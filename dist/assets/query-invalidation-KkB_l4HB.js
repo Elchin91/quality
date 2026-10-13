@@ -1,0 +1,1 @@
+var e=new Set([`evaluations`,`evaluation-comments`,`agents`,`analytics`,`analytics-summary`,`analytics-criteria`,`analytics-dashboard`,`me-summary`,`me-evaluations`,`me-evaluation`,`me-appeals`,`lead-appeals`,`reviewer-appeals`,`admin-appeals`,`appeal-review`,`notifications`]);function t(t){return t.invalidateQueries({predicate:t=>e.has(String(t.queryKey[0]))})}export{t};

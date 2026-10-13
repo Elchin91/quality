@@ -1,0 +1,379 @@
+import { getCallQaReviewSource, rejectCallQaAiDraft, saveCallQaTranscriptCorrections, } from './aiDraft.js';
+import { createCallQaAutomation } from './automation.js';
+import { refineCallQaTask } from './refinement.js';
+import path from 'node:path';
+import { createSecretKey } from 'node:crypto';
+import { loadChatSourceConfig } from '../chatQa/sourceConfig.js';
+import { listCallCatalog } from './catalog.js';
+import { createMongoCallSourceAdapter } from './mongoSource.js';
+import { appendCallQaOperationalEvent } from './operationalEvents.js';
+import { createFfprobeRecordingProbe } from './recordingProbe.js';
+import { openAdminCallRecording, openReviewerCallRecording } from './recordingAccess.js';
+import { CallsRecordingClient } from './recordingClient.js';
+import { loadRecordingConfig } from './recordingConfig.js';
+import { createCallQaReadiness } from './readiness.js';
+import { CallRecordingStore } from './recordingStore.js';
+import { getReviewerCallQaTask, listReviewerCallQaTasks } from './queries.js';
+import { assignCallQaTask, CallQaServiceError, cancelCallQaTask, completeCallQaTask, generateCallQaAiDraft, startCallQaTask, } from './service.js';
+import { callSourceConfigFromChatSource } from './sourceConfig.js';
+import { syncCallCatalog } from './sync.js';
+function loadState(options) {
+    let recordingConfig = null;
+    try {
+        recordingConfig = loadRecordingConfig(options.env);
+    }
+    catch {
+        recordingConfig = null;
+    }
+    let normalizationProtection = options.normalizationProtection ?? null;
+    let configuredSource = null;
+    if (!normalizationProtection) {
+        try {
+            const chat = loadChatSourceConfig(options.env);
+            if (chat) {
+                normalizationProtection = {
+                    externalAgentIdHmacKey: createSecretKey(chat.samplingHmacSecret),
+                };
+                configuredSource = createMongoCallSourceAdapter(callSourceConfigFromChatSource(chat));
+            }
+        }
+        catch {
+            normalizationProtection = null;
+            configuredSource = null;
+        }
+    }
+    const configuredProbe = options.env.FFPROBE_PATH?.trim();
+    const configuredFfmpeg = options.env.FFMPEG_PATH?.trim();
+    const probeExecutable = configuredProbe ||
+        (configuredFfmpeg && path.basename(configuredFfmpeg).startsWith('ffmpeg')
+            ? path.join(path.dirname(configuredFfmpeg), path.basename(configuredFfmpeg).replace(/^ffmpeg/u, 'ffprobe'))
+            : 'ffprobe');
+    return {
+        recordingConfig,
+        normalizationProtection,
+        source: options.source ?? configuredSource,
+        probeExecutable,
+    };
+}
+function serviceUnavailable(code) {
+    if (code === 'transcript_unavailable')
+        throw new CallQaServiceError(code, 404);
+    throw new Error('call qa source unavailable');
+}
+function requireAdmin(db, actorUserId) {
+    const row = db
+        .prepare(`SELECT 1 FROM users WHERE id=? AND role='admin' AND active=1 AND must_change_password=0`)
+        .get(actorUserId);
+    if (!row)
+        throw new CallQaServiceError('not_found', 404);
+}
+function adminSourceDetail(db, actorUserId, sourceRecordId) {
+    requireAdmin(db, actorUserId);
+    const row = db
+        .prepare(`SELECT records.id,records.source_ref,records.external_agent_name,
+              records.call_started_at_utc,records.call_ended_at_utc,records.baku_date,
+              records.duration_seconds,records.caller_last_four,records.direction,
+              records.queue_label,records.recording_status,records.first_seen_at,
+              records.last_seen_at,tasks.id AS task_id,tasks.status AS task_status
+         FROM call_source_records records
+         LEFT JOIN call_qa_tasks tasks ON tasks.source_record_id=records.id
+        WHERE records.id=?`)
+        .get(sourceRecordId);
+    if (!row)
+        throw new CallQaServiceError('not_found', 404);
+    return {
+        id: row.id,
+        sourceRef: row.source_ref,
+        externalAgentName: row.external_agent_name,
+        startedAtUtc: row.call_started_at_utc,
+        endedAtUtc: row.call_ended_at_utc,
+        bakuDate: row.baku_date,
+        durationSeconds: row.duration_seconds,
+        callerLastFour: row.caller_last_four,
+        direction: row.direction,
+        queueLabel: row.queue_label,
+        recordingStatus: row.recording_status,
+        assignmentStatus: row.task_status ?? 'unassigned',
+        taskId: row.task_id,
+        firstSeenAt: row.first_seen_at,
+        lastSeenAt: row.last_seen_at,
+    };
+}
+function locator(value) {
+    if (value.startsWith('call-url:'))
+        return { kind: 'call_url', value };
+    if (value.startsWith('omnichannel:'))
+        return { kind: 'omnichannel_id', value };
+    throw new CallQaServiceError('recording_not_ready', 409);
+}
+function bakuWindow(from, to) {
+    const start = new Date(`${from}T00:00:00+04:00`);
+    const end = new Date(new Date(`${to}T00:00:00+04:00`).getTime() + 86_400_000);
+    return { start, end };
+}
+function taskSource(db, taskId, reviewerUserId) {
+    const row = db
+        .prepare(`SELECT source_record_id FROM call_qa_tasks WHERE id=? AND reviewer_user_id=?`)
+        .get(taskId, reviewerUserId);
+    return row?.source_record_id ?? null;
+}
+/** Composes pure/domain services once from server-only configuration and injected I/O boundaries. */
+export function createCallQaRuntime(options) {
+    const state = loadState(options);
+    const source = state.source;
+    const recordingClient = state.recordingConfig
+        ? new CallsRecordingClient(state.recordingConfig)
+        : null;
+    let recordingStore = null;
+    if (state.recordingConfig) {
+        try {
+            recordingStore = new CallRecordingStore({
+                db: options.db,
+                uploadsRoot: options.uploadsRoot,
+                maxBytes: state.recordingConfig.maxBytes,
+                operationTimeoutMs: state.recordingConfig.timeoutMs,
+                probe: createFfprobeRecordingProbe({
+                    executable: state.probeExecutable,
+                    timeoutMs: 15_000,
+                }),
+            });
+        }
+        catch {
+            recordingStore = null;
+        }
+    }
+    const maxReadyBytes = state.recordingConfig?.maxBytes ?? 104_857_600;
+    const configured = Boolean(source && state.normalizationProtection && recordingClient && recordingStore);
+    const failedProbe = async () => {
+        throw new Error('call qa dependency unavailable');
+    };
+    const probes = options.readinessProbes;
+    const readiness = createCallQaReadiness({
+        configured,
+        probeSource: probes?.source ?? source?.probe?.bind(source) ?? failedProbe,
+        probeCallsAuth: probes?.callsAuth ?? recordingClient?.probeAuth.bind(recordingClient) ?? failedProbe,
+        probeRecordingEndpoint: probes?.recordingEndpoint ??
+            recordingClient?.probeRecordingEndpoint.bind(recordingClient) ??
+            failedProbe,
+        timeoutMs: Math.min(state.recordingConfig?.timeoutMs ?? 5_000, 10_000),
+    });
+    const status = readiness.status;
+    const automation = createCallQaAutomation({
+        db: options.db,
+        source,
+        normalizationProtection: state.normalizationProtection,
+        recordingClient,
+        recordingStore,
+    });
+    const admin = {
+        health: async ({ actorUserId }) => {
+            requireAdmin(options.db, actorUserId);
+            return status();
+        },
+        sync: async ({ actorUserId, from, to, pageSize, signal, correlationId }) => {
+            requireAdmin(options.db, actorUserId);
+            try {
+                if (!source || !state.normalizationProtection)
+                    return serviceUnavailable('source_unavailable');
+                const result = await syncCallCatalog({
+                    db: options.db,
+                    source,
+                    normalizationProtection: state.normalizationProtection,
+                    window: bakuWindow(from, to),
+                    bakuDateFrom: from,
+                    bakuDateTo: to,
+                    pageSize,
+                    signal,
+                    clock: () => new Date(),
+                });
+                appendCallQaOperationalEvent({
+                    db: options.db,
+                    actorUserId,
+                    actorRole: 'admin',
+                    eventType: 'sync_succeeded',
+                    batchSubject: 'catalog_sync',
+                    correlationId,
+                });
+                return result;
+            }
+            catch (error) {
+                appendCallQaOperationalEvent({
+                    db: options.db,
+                    actorUserId,
+                    actorRole: 'admin',
+                    eventType: 'sync_failed',
+                    batchSubject: 'catalog_sync',
+                    correlationId,
+                    code: 'source_unavailable',
+                });
+                throw error;
+            }
+        },
+        listSources: async ({ actorUserId, ...query }) => {
+            requireAdmin(options.db, actorUserId);
+            return listCallCatalog(options.db, query);
+        },
+        getSource: async ({ actorUserId, sourceRecordId }) => adminSourceDetail(options.db, actorUserId, sourceRecordId),
+        prepareRecording: async ({ actorUserId, sourceRecordId, signal, idempotencyKey }) => {
+            requireAdmin(options.db, actorUserId);
+            const row = options.db
+                .prepare('SELECT recording_locator FROM call_source_records WHERE id=?')
+                .get(sourceRecordId);
+            if (!row)
+                throw new CallQaServiceError('not_found', 404);
+            try {
+                if (!recordingClient || !recordingStore)
+                    return serviceUnavailable('source_unavailable');
+                const candidate = await recordingClient.getRecording(locator(row.recording_locator), signal);
+                const result = await recordingStore.store({
+                    sourceRecordId,
+                    response: candidate.response,
+                    signal,
+                });
+                appendCallQaOperationalEvent({
+                    db: options.db,
+                    actorUserId,
+                    actorRole: 'admin',
+                    eventType: 'preparation_succeeded',
+                    sourceRecordId,
+                    idempotencyKey,
+                });
+                return result;
+            }
+            catch (error) {
+                appendCallQaOperationalEvent({
+                    db: options.db,
+                    actorUserId,
+                    actorRole: 'admin',
+                    eventType: 'preparation_failed',
+                    sourceRecordId,
+                    idempotencyKey,
+                    code: 'recording_failed',
+                });
+                throw error;
+            }
+        },
+        openRecording: async ({ sourceRecordId, ...input }) => openAdminCallRecording({
+            db: options.db,
+            uploadsRoot: options.uploadsRoot,
+            sourceRecordId,
+            maxReadyBytes,
+            ...input,
+        }),
+        assign: async (input) => assignCallQaTask({ db: options.db, ...input }),
+        cancel: async (input) => cancelCallQaTask({ db: options.db, ...input }),
+    };
+    const reviewer = {
+        listTasks: async (input) => listReviewerCallQaTasks(options.db, input),
+        getTask: async (input) => getReviewerCallQaTask(options.db, input),
+        start: async (input) => {
+            startCallQaTask({ db: options.db, ...input });
+            return getReviewerCallQaTask(options.db, {
+                taskId: input.taskId,
+                reviewerUserId: input.reviewerUserId,
+            });
+        },
+        openRecording: async ({ taskId, ...input }) => openReviewerCallRecording({
+            db: options.db,
+            uploadsRoot: options.uploadsRoot,
+            taskId,
+            maxReadyBytes,
+            ...input,
+        }),
+        rejectDraft: async ({ taskId, reviewerUserId, aiReview, reason }) => rejectCallQaAiDraft(options.db, taskId, reviewerUserId, aiReview, reason),
+        reviewSource: async ({ taskId, reviewerUserId }) => getCallQaReviewSource(options.db, taskId, reviewerUserId),
+        refine: async (input) => {
+            if (!options.generateRefinement)
+                throw new CallQaServiceError('ai_generation_failed', 503);
+            return refineCallQaTask({ db: options.db, ...input, generate: options.generateRefinement });
+        },
+        saveTranscriptCorrections: async ({ taskId, reviewerUserId, sourceRevision, corrections }) => saveCallQaTranscriptCorrections({
+            db: options.db,
+            taskId,
+            reviewerUserId,
+            sourceRevision,
+            corrections,
+        }),
+        transcribe: async ({ taskId, reviewerUserId, signal, correlationId, qualityProfile }) => {
+            const sourceRecordId = taskSource(options.db, taskId, reviewerUserId);
+            try {
+                if (!options.transcribe)
+                    return serviceUnavailable('transcript_unavailable');
+                const result = await options.transcribe({
+                    db: options.db,
+                    uploadsRoot: options.uploadsRoot,
+                    taskId,
+                    reviewerUserId,
+                    signal,
+                    qualityProfile,
+                });
+                if (sourceRecordId)
+                    appendCallQaOperationalEvent({
+                        db: options.db,
+                        actorUserId: reviewerUserId,
+                        actorRole: 'reviewer',
+                        eventType: 'transcription_succeeded',
+                        taskId,
+                        sourceRecordId,
+                        correlationId,
+                    });
+                return result;
+            }
+            catch (error) {
+                if (sourceRecordId)
+                    appendCallQaOperationalEvent({
+                        db: options.db,
+                        actorUserId: reviewerUserId,
+                        actorRole: 'reviewer',
+                        eventType: 'transcription_failed',
+                        taskId,
+                        sourceRecordId,
+                        correlationId,
+                        code: 'transcript_unavailable',
+                    });
+                throw error;
+            }
+        },
+        draft: async ({ taskId, reviewerUserId, signal, correlationId }) => {
+            const sourceRecordId = taskSource(options.db, taskId, reviewerUserId);
+            try {
+                if (!options.generateDraft)
+                    throw new CallQaServiceError('ai_generation_failed', 503);
+                const result = await generateCallQaAiDraft({
+                    db: options.db,
+                    taskId,
+                    reviewerUserId,
+                    signal,
+                    generateDraft: (input) => options.generateDraft({ ...input, signal }),
+                });
+                if (sourceRecordId)
+                    appendCallQaOperationalEvent({
+                        db: options.db,
+                        actorUserId: reviewerUserId,
+                        actorRole: 'reviewer',
+                        eventType: 'draft_succeeded',
+                        taskId,
+                        sourceRecordId,
+                        correlationId,
+                    });
+                return result;
+            }
+            catch (error) {
+                if (sourceRecordId)
+                    appendCallQaOperationalEvent({
+                        db: options.db,
+                        actorUserId: reviewerUserId,
+                        actorRole: 'reviewer',
+                        eventType: 'draft_failed',
+                        taskId,
+                        sourceRecordId,
+                        correlationId,
+                        code: 'ai_failed',
+                    });
+                throw error;
+            }
+        },
+        complete: async (input) => completeCallQaTask({ db: options.db, ...input }),
+    };
+    return { admin, reviewer, status, automation };
+}
