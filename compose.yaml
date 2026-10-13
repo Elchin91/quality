@@ -1,0 +1,35 @@
+services:
+  api:
+    build: .
+    image: quality-server:local
+    restart: unless-stopped
+    init: true
+    user: "${QUALITY_UID:-1000}:${QUALITY_GID:-1000}"
+    env_file:
+      - "${QUALITY_ENV_FILE:-.env}"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: "8787"
+      DATA_DIR: /var/lib/agentscore-storage/data
+      JWT_SECRET: "${JWT_SECRET:?Set JWT_SECRET in .env}"
+      CORS_ORIGINS: "${CORS_ORIGINS:?Set the HTTPS site URL in .env}"
+      TRUST_PROXY: "1"
+    ports:
+      - "127.0.0.1:${QUALITY_HTTP_PORT:-8787}:8787"
+    volumes:
+      - type: bind
+        source: "${QUALITY_STORAGE_DIR:-/var/lib/agentscore-storage}"
+        target: /var/lib/agentscore-storage
+        bind:
+          create_host_path: false
+    stop_grace_period: 60s
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

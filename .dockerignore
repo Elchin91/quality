@@ -1,0 +1,16 @@
+**
+!Dockerfile
+!dist/
+!dist/**
+!server/
+!server/package.json
+!server/package-lock.json
+!server/dist/
+!server/dist/**
+!server/native/
+!server/native/*.c
+!server/native/*.h
+!server/scripts/
+!server/scripts/build-private-storage-native.mjs
+!scripts/
+!scripts/backup_data.py
