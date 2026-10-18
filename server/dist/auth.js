@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { db } from './db.js';
 import { logger } from './logger.js';
+import { usesInternalHttp } from './security.js';
 export const ALLOWED_DOMAIN = (process.env.ALLOWED_EMAIL_DOMAIN || 'pashapay.az').toLowerCase();
 const JWT_SECRET_RAW = process.env.JWT_SECRET;
 if (!JWT_SECRET_RAW && process.env.NODE_ENV === 'production') {
@@ -53,7 +54,7 @@ export function setAuthCookie(res, token) {
     res.cookie(COOKIE_NAME, token, {
         httpOnly: true,
         sameSite: 'strict',
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' && !usesInternalHttp(),
         maxAge: COOKIE_MAX_AGE_MS,
         path: '/',
     });
@@ -62,7 +63,7 @@ export function clearAuthCookie(res) {
     res.clearCookie(COOKIE_NAME, {
         httpOnly: true,
         sameSite: 'strict',
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' && !usesInternalHttp(),
         path: '/',
     });
 }

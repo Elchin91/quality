@@ -1,3 +1,13 @@
+/** Explicit exception for this server's internal HTTP origin; HTTPS remains the default. */
+export function usesInternalHttp(env = process.env) {
+    const flag = env.QUALITY_INTERNAL_HTTP;
+    if (flag === undefined || flag === '' || flag === 'false')
+        return false;
+    if (flag !== 'true' || env.CORS_ORIGINS?.trim() !== 'http://192.168.68.41:8787') {
+        throw new Error('QUALITY_INTERNAL_HTTP requires the single origin http://192.168.68.41:8787');
+    }
+    return true;
+}
 export function parseAllowedOrigins(value) {
     return (value || 'http://localhost:8080,http://127.0.0.1:8080')
         .split(',')

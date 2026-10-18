@@ -47,7 +47,7 @@ import { createReviewerDashboardRouter } from './routes/reviewer-dashboard.js';
 import { createCallQaAdminRouter } from './routes/call-qa-admin.js';
 import { createCallQaReviewerRouter } from './routes/call-qa-reviewer.js';
 import { requireAdmin, requireAuth, requirePasswordChangeComplete, requireRole } from './auth.js';
-import { csrfOriginGuard, parseAllowedOrigins } from './security.js';
+import { csrfOriginGuard, parseAllowedOrigins, usesInternalHttp } from './security.js';
 import { checkReadiness, setCallQaReadinessProvider } from './readiness.js';
 import { asyncHandler } from './asyncHandler.js';
 import { ChatQaRuntime, createShutdownCoordinator } from './chatQa/runtime.js';
@@ -128,7 +128,10 @@ function parseTrustProxy(value) {
 const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
 if (trustProxy !== undefined)
     app.set('trust proxy', trustProxy);
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({
+    contentSecurityPolicy: false,
+    strictTransportSecurity: usesInternalHttp() ? false : undefined,
+}));
 app.use(pinoHttp({
     logger,
     redact: [
