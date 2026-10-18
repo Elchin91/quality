@@ -33,6 +33,7 @@ export function callSourceConfigFromChatSource(source) {
         mysqlDatabase,
         mysqlTls: source.mysqlTls,
         laptopVpn: source.laptopVpn,
+        corporateNetwork: source.corporateNetwork,
         maxWindowDays: CALL_SOURCE_MAX_WINDOW_DAYS,
         maxPageSize: CALL_SOURCE_MAX_PAGE_SIZE,
         maxRows: CALL_SOURCE_MAX_ROWS,

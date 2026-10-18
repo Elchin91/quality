@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   api:
     build: .
@@ -15,14 +17,18 @@ services:
       JWT_SECRET: "${JWT_SECRET:?Set JWT_SECRET in .env}"
       CORS_ORIGINS: "${CORS_ORIGINS:?Set the HTTPS site URL in .env}"
       TRUST_PROXY: "1"
+      # Corporate MySQL profile: existing credentials stay in the server's .env.
+      CHAT_SOURCE_BACKEND: mysql
+      CHAT_SOURCE_CORPORATE_PROFILE: "true"
+      CHAT_SOURCE_MYSQL_TLS: "${CHAT_SOURCE_MYSQL_TLS:-false}"
+      CHAT_SOURCE_VPN_PROFILE: "false"
+      AGENTSCORE_LAPTOP_PROFILE: "0"
     ports:
       - "127.0.0.1:${QUALITY_HTTP_PORT:-8787}:8787"
     volumes:
       - type: bind
         source: "${QUALITY_STORAGE_DIR:-/var/lib/agentscore-storage}"
         target: /var/lib/agentscore-storage
-        bind:
-          create_host_path: false
     stop_grace_period: 60s
     cap_drop:
       - ALL

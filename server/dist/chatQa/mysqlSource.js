@@ -3,6 +3,7 @@ import { boundedSqlLimit } from '../sourceSqlLimit.js';
 import { assertLaptopVpnRoute, monitorLaptopVpnRoute } from '../sourceVpnRoute.js';
 import { assertSourceEvidenceBudget, MAX_MESSAGES_PER_CONVERSATION } from './evidenceSecurity.js';
 import { batchCatalogValues, CATALOG_LIMITS, readCatalogSiblingBatches, splitCatalogWindow, } from './sourceCatalog.js';
+import { allowsCorporateMysql } from './sourceConfig.js';
 import { SourceDiagnosticError, sourceDiagnosticFromError } from './sourceDiagnostics.js';
 import { loadSourceAgentDirectory } from './sourceDirectory.js';
 import { normalizeConversationEvidence } from './sourceEvidence.js';
@@ -42,7 +43,9 @@ export class MysqlChatSourceClient {
     teardown = null;
     constructor(config) {
         this.config = config;
-        if (!config.mysqlTls && !config.laptopVpn)
+        const corporateAllowed = allowsCorporateMysql(config);
+        if ((config.corporateNetwork && !corporateAllowed) ||
+            (!config.mysqlTls && !config.laptopVpn && !corporateAllowed))
             throw sourceFailure('connection');
         if (config.laptopVpn && config.mysqlHost !== '192.168.46.4')
             throw sourceFailure('VPN route');

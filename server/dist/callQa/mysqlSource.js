@@ -1,5 +1,6 @@
 import mysql from 'mysql2/promise';
 import { boundedSqlLimit } from '../sourceSqlLimit.js';
+import { allowsCorporateMysql } from '../chatQa/sourceConfig.js';
 import { assertLaptopVpnRoute, LAPTOP_VPN_SOURCE_HOST, monitorLaptopVpnRoute, } from '../sourceVpnRoute.js';
 import { CALL_SOURCE_MAX_PAGE_SIZE, CALL_SOURCE_MAX_WINDOW_DAYS, } from './sourceConfig.js';
 import { CALL_SOURCE_PROJECTION, } from './sourceClient.js';
@@ -124,7 +125,9 @@ function rawRecord(row) {
 }
 /** Read-only SQL authority: an answered incoming report plus the same agent's completion. */
 export function createMysqlCallSourceAdapter(config) {
-    if ((!config.mysqlTls && !config.laptopVpn) ||
+    const corporateAllowed = allowsCorporateMysql(config);
+    if ((config.corporateNetwork && !corporateAllowed) ||
+        (!config.mysqlTls && !config.laptopVpn && !corporateAllowed) ||
         (config.laptopVpn && config.mysqlHost !== LAPTOP_VPN_SOURCE_HOST)) {
         throw new Error('invalid call source configuration');
     }

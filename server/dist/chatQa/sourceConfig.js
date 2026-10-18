@@ -1,3 +1,7 @@
+export function allowsCorporateMysql(config) {
+    return config.corporateNetwork === true && config.backend === 'mysql' &&
+        config.mysqlHost === '192.168.46.4' && !config.laptopVpn;
+}
 const REQUIRED_KEYS = [
     'CHAT_SOURCE_MONGO_URI',
     'CHAT_SOURCE_MONGO_DATABASE',
@@ -106,9 +110,13 @@ export function loadChatSourceConfig(env) {
         ? ''
         : parseMongoUri(required(env, 'CHAT_SOURCE_MONGO_URI'), production && !laptopVpn, laptopVpn);
     const mysqlTls = parseBoolean(required(env, 'CHAT_SOURCE_MYSQL_TLS'), 'CHAT_SOURCE_MYSQL_TLS', true);
-    if (production && !laptopVpn && !mysqlTls)
-        throw new Error('invalid configuration: CHAT_SOURCE_MYSQL_TLS');
     const mysqlHost = required(env, 'CHAT_SOURCE_MYSQL_HOST');
+    const corporateNetwork = parseBoolean(env.CHAT_SOURCE_CORPORATE_PROFILE, 'CHAT_SOURCE_CORPORATE_PROFILE', false);
+    const corporateAllowed = allowsCorporateMysql({ backend, mysqlHost, corporateNetwork, laptopVpn });
+    if (corporateNetwork && !corporateAllowed)
+        throw new Error('invalid configuration: CHAT_SOURCE_CORPORATE_PROFILE');
+    if (production && !laptopVpn && !corporateAllowed && !mysqlTls)
+        throw new Error('invalid configuration: CHAT_SOURCE_MYSQL_TLS');
     if (laptopVpn && mysqlHost !== '192.168.46.4')
         throw new Error('invalid configuration: CHAT_SOURCE_MYSQL_HOST');
     return {
@@ -122,6 +130,7 @@ export function loadChatSourceConfig(env) {
         mysqlPassword: required(env, 'CHAT_SOURCE_MYSQL_PASSWORD'),
         mysqlDatabase: required(env, 'CHAT_SOURCE_MYSQL_DATABASE'),
         mysqlTls,
+        corporateNetwork,
         laptopVpn,
         queryTimeoutMs: parseQueryTimeout(env.CHAT_SOURCE_QUERY_TIMEOUT_MS),
         samplingHmacSecret: parseBase64(required(env, 'CHAT_SAMPLING_HMAC_SECRET')),

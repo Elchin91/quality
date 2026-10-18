@@ -13,7 +13,7 @@ RUN npm run build:native --prefix server \
 
 FROM node:24.20.0-bookworm-slim AS runtime
 WORKDIR /app
-ENV NODE_ENV=production HOST=0.0.0.0 PORT=8787 DATA_DIR=/var/lib/agentscore-storage/data
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=8787 DATA_DIR=/var/lib/agentscore-storage/data CHAT_SOURCE_BACKEND=mysql
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg ca-certificates python3 tzdata \
     && rm -rf /var/lib/apt/lists/* \
