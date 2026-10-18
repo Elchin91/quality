@@ -199,18 +199,18 @@ export async function runChatQaCycle(input) {
         if (settings.enabled === 1 || input.rosterMode) {
             if (input.signal?.aborted)
                 throw new Error('job aborted');
-            const syncResult = await (input.sync ?? syncChatCatalog)({
-                db: input.db,
-                source: input.source,
-                clock,
-                dryRun: false,
-                overlapDays: settings.overlap_days,
-                catalogScope: input.rosterMode ? 'roster_month' : 'full',
-                signal: input.signal,
-            });
-            syncStatus = syncResult.status;
+            if (input.syncCatalog !== false)
+                syncStatus = (await (input.sync ?? syncChatCatalog)({
+                    db: input.db,
+                    source: input.source,
+                    clock,
+                    dryRun: false,
+                    overlapDays: settings.overlap_days,
+                    catalogScope: input.rosterMode ? 'roster_month' : 'full',
+                    signal: input.signal,
+                })).status;
             assertSchedulerLease(input.db, runId, leaseGeneration, nowFrom(clock).getTime());
-            if (syncResult.status === 'succeeded' &&
+            if ((syncStatus === null || syncStatus === 'succeeded') &&
                 (!input.rosterMode || input.rosterAssignmentsEnabled === true)) {
                 if (input.signal?.aborted)
                     throw new Error('job aborted');

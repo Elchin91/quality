@@ -7,6 +7,7 @@ import { RecordingStoreError, } from './recordingStoreTypes.js';
 import { assertPublishedRecording, shaFromUploadId, uploadIdForSha, validatedProbe, } from './recordingStoreValidation.js';
 import { cleanupRecordingOperation } from './recordingStoreCleanup.js';
 import { recordingStoreTimeout, validStoreInput } from './recordingStoreBoundary.js';
+import { restoreEvictedRecording } from './recordingCacheFiles.js';
 export { RecordingStoreError } from './recordingStoreTypes.js';
 const POLL_INTERVAL_MS = 5;
 const trustedRecordingStoreErrors = new WeakMap();
@@ -307,6 +308,7 @@ export class CallRecordingStore {
             throwIfAborted(signal);
             const existing = this.database(() => this.#repository.uploadRow(uploadId));
             if (existing) {
+                await restoreEvictedRecording(this.#repository, existing, temp, probe, directories, signal);
                 const valid = await this.validateUpload(existing, directories, signal);
                 if (!valid || valid.mimeType !== probe.mimeType)
                     throw storeError('stale_recording_upload');

@@ -180,7 +180,7 @@ export function createQaAutomationRouter(db) {
                 if (!wasEnabled && parsed.data.enabled)
                     new DurableJobRepository(db).enqueue({
                         type: 'chat_scheduled_cycle',
-                        payload: { trigger: 'manual' },
+                        payload: { trigger: 'manual', sync_catalog: false },
                         idempotencyKey: `qa-enabled-${nanoid(16)}`,
                         now,
                     });

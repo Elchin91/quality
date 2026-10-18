@@ -100,6 +100,27 @@ def check_recording_file(recordings, upload_id, relative, path):
         raise ValueError('ready call recording path, size or content hash is inconsistent')
 
 
+def evicted_recordings(db, recordings):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_recording_cache'").fetchone():
+        return set()
+    rows = db.execute('SELECT upload_id,state FROM call_recording_cache').fetchall()
+    if any(state not in ('present', 'evicted') for _, state in rows):
+        raise ValueError('recording cache recovery must finish before backup')
+    evicted = {key for key, state in rows if state == 'evicted'}
+    if not evicted.issubset(recordings):
+        raise ValueError('evicted call recording has no verified source')
+    return evicted
+
+
+def absent_recording(base, relative, key, recordings):
+    expected = f'uploads/call-recordings/{recordings[key][0]}.audio'
+    if relative != expected:
+        raise ValueError('evicted call recording mapping is invalid')
+    candidate = base / relative
+    if candidate.exists() or any(p.is_symlink() for p in [candidate, *candidate.parents] if p != base.parent):
+        raise ValueError('evicted call recording cache state is inconsistent')
+
+
 def safe_file(base, relative):
     rel = Path(relative)
     if rel.is_absolute() or '..' in rel.parts:
@@ -187,6 +208,7 @@ def backup(source, destination):
         snap = checked_db(stage / 'data.db')
         try:
             recordings = ready_recordings(snap)
+            evicted = evicted_recordings(snap, recordings)
             uploads = snap.execute('SELECT id, path, size FROM uploads').fetchall()
             tables = [r[0] for r in snap.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
             counts = {t: snap.execute('SELECT count(*) FROM "' + t.replace('"', '""') + '"').fetchone()[0] for t in tables}
@@ -209,6 +231,13 @@ def backup(source, destination):
         paths = {}
         for upload_id, stored, expected_size in uploads:
             original = Path(stored)
+            if upload_id in evicted:
+                relative = f'uploads/call-recordings/{recordings[upload_id][0]}.audio'
+                if original.name != Path(relative).name or original.parent.name != 'call-recordings':
+                    raise ValueError('evicted call recording path is invalid')
+                absent_recording(source, relative, upload_id, recordings)
+                paths[upload_id] = relative
+                continue
             if not original.is_absolute():
                 original = source / original
             try:
@@ -235,8 +264,9 @@ def backup(source, destination):
         if calibration_files(source) != calibration:
             raise ValueError('calibration changed during backup; stop CLI writers and retry')
         files = {p.relative_to(stage).as_posix(): digest(p) for p in stage.rglob('*') if p.is_file()}
-        manifest = {'format': 1, 'created_at': datetime.now(timezone.utc).isoformat(),
-                    'files': files, 'upload_paths': paths, 'row_counts': counts}
+        manifest = {'format': 2 if evicted else 1, 'created_at': datetime.now(timezone.utc).isoformat(),
+                    'files': files, 'upload_paths': paths, 'row_counts': counts,
+                    'evicted_uploads': sorted(evicted)}
         (stage / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
         for p in stage.rglob('*'):
             p.chmod(0o700 if p.is_dir() else 0o600)
@@ -253,7 +283,7 @@ def restore(source, destination):
     if destination.exists() or destination.is_relative_to(source):
         raise ValueError('restore destination must be new; never overwrite live data')
     manifest = json.loads(safe_file(source, 'manifest.json').read_text())
-    if manifest.get('format') != 1 or 'data.db' not in manifest['files']:
+    if manifest.get('format') not in (1, 2) or 'data.db' not in manifest['files']:
         raise ValueError('unsupported backup format')
     for rel, expected in manifest['files'].items():
         if digest(safe_file(source, rel)) != expected:
@@ -264,13 +294,19 @@ def restore(source, destination):
     db = checked_db(source / 'data.db')
     try:
         recordings = ready_recordings(db)
+        evicted = evicted_recordings(db, recordings)
         upload_ids = {row[0] for row in db.execute('SELECT id FROM uploads')}
     finally:
         db.close()
     mappings = manifest.get('upload_paths')
+    if manifest.get('evicted_uploads', []) != sorted(evicted):
+        raise ValueError('backup evicted recording mapping is incomplete')
     if not isinstance(mappings, dict) or set(mappings) != upload_ids:
         raise ValueError('backup upload mapping is incomplete')
-    for relative in mappings.values():
+    for upload_id, relative in mappings.items():
+        if upload_id in evicted:
+            absent_recording(source, relative, upload_id, recordings)
+            continue
         rel = Path(relative)
         if not rel.parts or rel.parts[0] != 'uploads' or relative not in manifest['files']:
             raise ValueError('unsafe backup upload mapping')
@@ -287,8 +323,11 @@ def restore(source, destination):
         (stage / 'uploads').mkdir(exist_ok=True)
         with sqlite3.connect(stage / 'data.db') as db:
             for upload_id, rel in manifest['upload_paths'].items():
-                media = safe_file(stage, rel)
-                check_recording_file(recordings, upload_id, rel, media)
+                if upload_id in evicted:
+                    absent_recording(stage, rel, upload_id, recordings)
+                else:
+                    media = safe_file(stage, rel)
+                    check_recording_file(recordings, upload_id, rel, media)
                 db.execute('UPDATE uploads SET path = ? WHERE id = ?', (str(destination / rel), upload_id))
             for upload_id, stored in db.execute('SELECT id, path FROM uploads'):
                 if stored != str(destination / mappings[upload_id]):

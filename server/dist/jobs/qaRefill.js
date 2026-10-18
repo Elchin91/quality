@@ -12,7 +12,7 @@ export function enqueueQaRefill(db, taskId, event, nowMs) {
         return;
     new DurableJobRepository(db).enqueue({
         type: 'chat_scheduled_cycle',
-        payload: { trigger: 'manual' },
+        payload: { trigger: 'manual', sync_catalog: false },
         idempotencyKey: `qa-refill-${event}-${taskId}`,
         now: nowMs,
     });
@@ -29,7 +29,7 @@ export function enqueueReviewerRefill(db, reviewerId, nowMs) {
         return;
     new DurableJobRepository(db).enqueue({
         type: 'chat_scheduled_cycle',
-        payload: { trigger: 'manual' },
+        payload: { trigger: 'manual', sync_catalog: false },
         idempotencyKey: `qa-activation-${nanoid(16)}`,
         now: nowMs,
     });

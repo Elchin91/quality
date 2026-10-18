@@ -7,6 +7,7 @@ const ROSTER_REFRESH_MS = 60 * 60_000;
 /** Each source is isolated so a lost VPN leg cannot suppress the other channel. */
 export async function runQaAutomationCycle(input) {
     const now = input.clock?.() ?? new Date();
+    const syncCatalog = input.syncCatalog !== false;
     if (!Number.isFinite(now.getTime()))
         throw new Error('invalid automation clock');
     const result = {
@@ -55,6 +56,7 @@ export async function runQaAutomationCycle(input) {
                     includeMaintenance: false,
                     rosterMode: true,
                     rosterAssignmentsEnabled: assignEnabled,
+                    syncCatalog,
                     signal,
                 });
                 if (signal.aborted)
@@ -67,7 +69,7 @@ export async function runQaAutomationCycle(input) {
         boundedOperation(input.signal, timeout, async (signal) => {
             if (!input.callCycle)
                 return;
-            await input.callCycle(signal, assignEnabled);
+            await input.callCycle(signal, assignEnabled, syncCatalog);
             if (signal.aborted)
                 throw new Error('job aborted');
             result.call = 'succeeded';
@@ -80,5 +82,10 @@ export async function runQaAutomationCycle(input) {
     if (result.chat !== 'succeeded' && result.call !== 'succeeded') {
         throw new Error('qa automation sources unavailable');
     }
+    if (syncCatalog &&
+        (result.chat === 'failed' ||
+            result.call === 'failed' ||
+            (input.chatSourceEnabled === true && result.chat !== 'succeeded')))
+        throw new Error('qa automation source sync incomplete');
     return result;
 }

@@ -216,13 +216,11 @@ export class MysqlChatSourceClient {
                 requestJoinRate: 0,
                 conversationJoinRate: 0,
                 issues: ['source preflight failed'],
-                errorCode: error instanceof Error && error.message === 'chat source VPN route failed'
-                    ? 'source_route_unavailable'
-                    : stage === 'connection'
-                        ? 'source_connection_failed'
-                        : stage === 'schema'
-                            ? 'source_schema_invalid'
-                            : 'source_preflight_failed',
+                errorCode: sourceDiagnosticFromError(error, stage === 'connection'
+                    ? 'source_connection_failed'
+                    : stage === 'schema'
+                        ? 'source_schema_invalid'
+                        : 'source_preflight_failed'),
             };
         }
     }

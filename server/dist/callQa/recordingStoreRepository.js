@@ -15,6 +15,20 @@ export class CallRecordingStoreRepository {
             .prepare('SELECT id, type, size, mime, path FROM uploads WHERE id = ?')
             .get(uploadId);
     }
+    isCacheEvicted(uploadId) {
+        if (!this.#db
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='call_recording_cache'")
+            .get())
+            return false;
+        return Boolean(this.#db
+            .prepare("SELECT 1 FROM call_recording_cache WHERE upload_id=? AND state='evicted'")
+            .get(uploadId));
+    }
+    markCachePresent(uploadId) {
+        this.#db
+            .prepare("UPDATE call_recording_cache SET state='present',last_access_ms=?,retry_after_ms=0 WHERE upload_id=?")
+            .run(this.#now(), uploadId);
+    }
     claimSource(sourceRecordId, operationId, expiresAtMs) {
         return this.#db
             .transaction(() => {

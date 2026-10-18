@@ -14,6 +14,7 @@ import { CallsRecordingClient } from './recordingClient.js';
 import { loadRecordingConfig } from './recordingConfig.js';
 import { createCallQaReadiness } from './readiness.js';
 import { CallRecordingStore } from './recordingStore.js';
+import { CallRecordingCache, recordingCacheSettings } from './recordingCache.js';
 import { getReviewerCallQaTask, listReviewerCallQaTasks } from './queries.js';
 import { assignCallQaTask, CallQaServiceError, cancelCallQaTask, completeCallQaTask, generateCallQaAiDraft, startCallQaTask, } from './service.js';
 import { callSourceConfigFromChatSource } from './sourceConfig.js';
@@ -148,6 +149,21 @@ export function createCallQaRuntime(options) {
         }
     }
     const maxReadyBytes = state.recordingConfig?.maxBytes ?? 104_857_600;
+    const cache = recordingClient && recordingStore
+        ? new CallRecordingCache({
+            db: options.db,
+            uploadsRoot: options.uploadsRoot,
+            maxFileBytes: maxReadyBytes,
+            ...recordingCacheSettings(options.env),
+            getRecording: (locator, signal) => recordingClient.getRecording(locator, signal),
+            store: recordingStore,
+            probe: createFfprobeRecordingProbe({
+                executable: state.probeExecutable,
+                timeoutMs: 15_000,
+            }),
+        })
+        : null;
+    cache?.start();
     const configured = Boolean(source && state.normalizationProtection && recordingClient && recordingStore);
     const failedProbe = async () => {
         throw new Error('call qa dependency unavailable');
@@ -169,6 +185,7 @@ export function createCallQaRuntime(options) {
         normalizationProtection: state.normalizationProtection,
         recordingClient,
         recordingStore,
+        prepareRecording: cache ? (id, signal) => cache.prepare(id, signal) : undefined,
     });
     const admin = {
         health: async ({ actorUserId }) => {
@@ -229,12 +246,14 @@ export function createCallQaRuntime(options) {
             try {
                 if (!recordingClient || !recordingStore)
                     return serviceUnavailable('source_unavailable');
-                const candidate = await recordingClient.getRecording(locator(row.recording_locator), signal);
-                const result = await recordingStore.store({
-                    sourceRecordId,
-                    response: candidate.response,
-                    signal,
-                });
+                const result = cache
+                    ? await cache.prepare(sourceRecordId, signal)
+                    : await recordingStore.store({
+                        sourceRecordId,
+                        response: (await recordingClient.getRecording(locator(row.recording_locator), signal))
+                            .response,
+                        signal,
+                    });
                 appendCallQaOperationalEvent({
                     db: options.db,
                     actorUserId,
@@ -264,6 +283,7 @@ export function createCallQaRuntime(options) {
             sourceRecordId,
             maxReadyBytes,
             ...input,
+            ...(cache && input.method !== 'HEAD' ? { openReadyFile: cache.open } : {}),
         }),
         assign: async (input) => assignCallQaTask({ db: options.db, ...input }),
         cancel: async (input) => cancelCallQaTask({ db: options.db, ...input }),
@@ -284,6 +304,7 @@ export function createCallQaRuntime(options) {
             taskId,
             maxReadyBytes,
             ...input,
+            ...(cache && input.method !== 'HEAD' ? { openReadyFile: cache.open } : {}),
         }),
         rejectDraft: async ({ taskId, reviewerUserId, aiReview, reason }) => rejectCallQaAiDraft(options.db, taskId, reviewerUserId, aiReview, reason),
         reviewSource: async ({ taskId, reviewerUserId }) => getCallQaReviewSource(options.db, taskId, reviewerUserId),
@@ -311,6 +332,7 @@ export function createCallQaRuntime(options) {
                     reviewerUserId,
                     signal,
                     qualityProfile,
+                    ...(cache ? { openReadyFile: cache.open } : {}),
                 });
                 if (sourceRecordId)
                     appendCallQaOperationalEvent({
@@ -380,5 +402,13 @@ export function createCallQaRuntime(options) {
         },
         complete: async (input) => completeCallQaTask({ db: options.db, ...input }),
     };
-    return { admin, reviewer, status, automation };
+    return {
+        admin,
+        reviewer,
+        status,
+        automation,
+        close: async () => {
+            await cache?.close();
+        },
+    };
 }

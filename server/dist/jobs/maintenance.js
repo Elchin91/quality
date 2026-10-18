@@ -32,7 +32,7 @@ export function createMaintenanceHandlers(input) {
                 return;
             }
             if (input.automationCycle) {
-                await input.automationCycle(signal);
+                await input.automationCycle(signal, payload.sync_catalog !== false);
                 if (signal.aborted)
                     throw new Error('job aborted');
                 return;
@@ -47,6 +47,8 @@ export function createMaintenanceHandlers(input) {
                 source,
                 clock,
                 includeMaintenance: false,
+                syncCatalog: payload.sync_catalog !== false,
+                signal,
             });
             if (result.status === 'failed')
                 throw new Error('chat_scheduled_cycle_failed');
@@ -76,16 +78,16 @@ export function scheduleDurableChatQaJobs(input) {
     let cycleTimer = null;
     const retryTimers = new Set();
     let closed = false;
-    const enqueue = (type, fired) => {
+    const enqueue = (type, fired, syncCatalog = true) => {
         const key = bakuDay(fired);
         if (type === 'chat_scheduled_cycle') {
-            const cycleKey = input.automationCycle
-                ? `${fired.toISOString().slice(0, 13)}-${String(Math.floor(fired.getUTCMinutes() / 15)).padStart(2, '0')}`
-                : key;
-            repository.enqueue({
+            const cycleKey = syncCatalog
+                ? `qa-source-sync-${key}`
+                : `qa-assignment-${fired.toISOString().slice(0, 13)}-${String(Math.floor(fired.getUTCMinutes() / 15)).padStart(2, '0')}`;
+            return repository.enqueue({
                 type,
-                payload: { trigger: 'scheduled' },
-                idempotencyKey: `chat-cycle-${cycleKey}`,
+                payload: { trigger: 'scheduled', sync_catalog: syncCatalog },
+                idempotencyKey: cycleKey,
                 now: fired.getTime(),
             });
         }
@@ -106,16 +108,16 @@ export function scheduleDurableChatQaJobs(input) {
             });
         }
     };
-    const enqueueWithRetry = (type, fired) => {
+    const enqueueWithRetry = (type, fired, syncCatalog = true) => {
         if (closed)
             return;
         try {
-            enqueue(type, fired);
+            return enqueue(type, fired, syncCatalog);
         }
         catch {
             const retryTimer = setTimer(() => {
                 retryTimers.delete(retryTimer);
-                enqueueWithRetry(type, fired);
+                enqueueWithRetry(type, fired, syncCatalog);
             }, retryMs);
             retryTimers.add(retryTimer);
         }
@@ -127,8 +129,10 @@ export function scheduleDurableChatQaJobs(input) {
         const next = Math.floor(now.getTime() / 900_000 + 1) * 900_000;
         cycleTimer = setTimer(() => {
             cycleTimer = null;
-            if (!closed)
-                enqueueWithRetry('chat_scheduled_cycle', clock());
+            const fired = clock();
+            // The daily catalog job also assigns; avoid a competing cycle in its 09:00 slot.
+            if (!closed && !(fired.getUTCHours() === 5 && fired.getUTCMinutes() < 15))
+                enqueueWithRetry('chat_scheduled_cycle', fired, false);
             scheduleAutomation();
         }, Math.max(1, next - now.getTime()));
     };
@@ -139,7 +143,7 @@ export function scheduleDurableChatQaJobs(input) {
         timer = setTimer(() => {
             timer = null;
             const fired = clock();
-            if (!input.automationCycle && input.sourceEnabled !== false)
+            if (input.automationCycle || input.sourceEnabled !== false)
                 enqueueWithRetry('chat_scheduled_cycle', fired);
             enqueueWithRetry('chat_sla_scan', fired);
             enqueueWithRetry('chat_retention_purge', fired);
@@ -148,8 +152,14 @@ export function scheduleDurableChatQaJobs(input) {
     };
     worker.start();
     schedule();
+    const started = clock();
+    const dailyDue = started.getTime() >= Date.parse(`${bakuDay(started)}T09:00:00+04:00`);
+    const daily = dailyDue && (input.automationCycle || input.sourceEnabled !== false)
+        ? enqueueWithRetry('chat_scheduled_cycle', started)
+        : undefined;
     if (input.automationCycle) {
-        enqueueWithRetry('chat_scheduled_cycle', clock());
+        if (!dailyDue || daily?.status === 'succeeded')
+            enqueueWithRetry('chat_scheduled_cycle', started, false);
         scheduleAutomation();
     }
     return {

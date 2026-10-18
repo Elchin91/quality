@@ -49,12 +49,14 @@ export async function prepareSelectedCallRecording(dependencies, input) {
         throw new Error('call qa recording dependency unavailable');
     const idempotencyKey = nanoid(24);
     try {
-        const candidate = await client.getRecording(locator(row.recording_locator), input.signal);
-        const stored = await store.store({
-            sourceRecordId: input.sourceRecordId,
-            response: candidate.response,
-            signal: input.signal,
-        });
+        const stored = dependencies.prepareRecording
+            ? await dependencies.prepareRecording(input.sourceRecordId, input.signal)
+            : await store.store({
+                sourceRecordId: input.sourceRecordId,
+                response: (await client.getRecording(locator(row.recording_locator), input.signal))
+                    .response,
+                signal: input.signal,
+            });
         appendCallQaOperationalEvent({
             db: dependencies.db,
             actorUserId: null,
@@ -189,10 +191,11 @@ export function createCallQaAutomation(dependencies) {
             enforceRosterQuota: true,
             signal,
         }),
-        async run(signal, assignEnabled = false) {
+        async run(signal, assignEnabled = false, syncCatalog = true) {
             if (signal.aborted)
                 throw new Error('call qa automation aborted');
-            await syncCurrentMonth(dependencies, signal);
+            if (syncCatalog)
+                await syncCurrentMonth(dependencies, signal);
             if (!assignEnabled)
                 return;
             if (!dependencies.recordingClient || !dependencies.recordingStore)

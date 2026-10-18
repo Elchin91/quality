@@ -42,7 +42,7 @@ export async function transcribeCallQaTask(input) {
     const upload = authorized(input);
     let opened = null;
     try {
-        opened = await openReadyRecordingFile({
+        opened = await (input.openReadyFile ?? openReadyRecordingFile)({
             uploadsRoot: input.uploadsRoot,
             uploadId: upload.upload_id,
             storagePath: upload.storage_path,

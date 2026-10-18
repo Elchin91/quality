@@ -4,6 +4,7 @@ const emptyOptions = z.object({}).strict();
 const scheduledOptions = z
     .object({
     trigger: z.enum(['scheduled', 'manual']).optional(),
+    sync_catalog: z.boolean().optional(),
     sync_operation_id: z
         .string()
         .regex(/^[A-Za-z0-9_-]{1,200}$/u)

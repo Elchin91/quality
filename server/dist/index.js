@@ -68,11 +68,13 @@ const careSync = getCareSyncCoordinator(db);
 export const chatQaRuntime = new ChatQaRuntime({
     db,
     env: process.env,
-    automationCycle: async (signal) => {
+    automationCycle: async (signal, syncCatalog) => {
         await runQaAutomationCycle({
             db,
             chatSource: () => chatQaRuntime.getOrConnectSource(),
-            callCycle: (callSignal, assignEnabled) => callQaRuntime.automation.run(callSignal, assignEnabled),
+            chatSourceEnabled: chatQaRuntime.getStatus().enabled,
+            callCycle: (callSignal, assignEnabled, syncCalls) => callQaRuntime.automation.run(callSignal, assignEnabled, syncCalls),
+            syncCatalog,
             signal,
         });
     },
@@ -288,6 +290,7 @@ const closeResources = createShutdownCoordinator({
     runtime: {
         close: async () => {
             await careSync.stop();
+            await callQaRuntime.close();
             await chatQaRuntime.close();
         },
     },
