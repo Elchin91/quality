@@ -1,0 +1,1 @@
+import{f as e,t}from"./useTranslation-qiHcixyk.js";import{t as n}from"./badge-Brv73C8K.js";var r=e(),i={pending_lead:`secondary`,lead_rejected:`destructive`,pending_assignment:`secondary`,pending_review:`default`,upheld:`outline`,adjusted:`default`};function a({status:e}){let{t:a}=t();return(0,r.jsx)(n,{variant:i[e],children:a(`appeals.status.${e}`)})}export{a as t};

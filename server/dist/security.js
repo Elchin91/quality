@@ -1,3 +1,13 @@
+import helmet from 'helmet';
+export function securityHeaders(env = process.env) {
+    const internalHttp = usesInternalHttp(env);
+    return helmet({
+        contentSecurityPolicy: false,
+        strictTransportSecurity: internalHttp ? false : undefined,
+        crossOriginOpenerPolicy: internalHttp ? false : undefined,
+        originAgentCluster: internalHttp ? false : undefined,
+    });
+}
 /** Explicit exception for this server's internal HTTP origin; HTTPS remains the default. */
 export function usesInternalHttp(env = process.env) {
     const flag = env.QUALITY_INTERNAL_HTTP;

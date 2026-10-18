@@ -2,7 +2,6 @@ import { getCareSyncCoordinator } from './confluenceIndexSync.js';
 import { createCareSyncRouter } from './routes/care-sync.js';
 import { closeAppEventStreams, attachAppEventServer } from './realtime/appEvents.js';
 import express from 'express';
-import helmet from 'helmet';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { readFileSync } from 'node:fs';
@@ -37,6 +36,7 @@ import { analyticsRouter } from './routes/analytics.js';
 import { settingsRouter } from './routes/settings.js';
 import { authRouter } from './routes/auth.js';
 import { meRouter } from './routes/me.js';
+import { createHistoricalEvaluationRouter } from './importM10/historyRoutes.js';
 import { adminUsersRouter } from './routes/admin-users.js';
 import { appealsRouter } from './routes/appeals.js';
 import { notificationsRouter } from './routes/notifications.js';
@@ -47,7 +47,7 @@ import { createReviewerDashboardRouter } from './routes/reviewer-dashboard.js';
 import { createCallQaAdminRouter } from './routes/call-qa-admin.js';
 import { createCallQaReviewerRouter } from './routes/call-qa-reviewer.js';
 import { requireAdmin, requireAuth, requirePasswordChangeComplete, requireRole } from './auth.js';
-import { csrfOriginGuard, parseAllowedOrigins, usesInternalHttp } from './security.js';
+import { csrfOriginGuard, parseAllowedOrigins, securityHeaders } from './security.js';
 import { checkReadiness, setCallQaReadinessProvider } from './readiness.js';
 import { asyncHandler } from './asyncHandler.js';
 import { ChatQaRuntime, createShutdownCoordinator } from './chatQa/runtime.js';
@@ -130,10 +130,7 @@ function parseTrustProxy(value) {
 const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
 if (trustProxy !== undefined)
     app.set('trust proxy', trustProxy);
-app.use(helmet({
-    contentSecurityPolicy: false,
-    strictTransportSecurity: usesInternalHttp() ? false : undefined,
-}));
+app.use(securityHeaders());
 app.use(pinoHttp({
     logger,
     redact: [
@@ -215,6 +212,7 @@ app.use('/api', createQaAutomationRouter(db));
 app.use('/api', createReviewerDashboardRouter({ db }));
 // Agent-scoped portal.
 app.use('/api', meRouter);
+app.use('/api', createHistoricalEvaluationRouter(db));
 app.use('/api', appealsRouter);
 app.use('/api', createEvaluationAttachmentRouter({
     openAttachment: openChatAttachment,

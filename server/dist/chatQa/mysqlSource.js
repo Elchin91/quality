@@ -7,13 +7,14 @@ import { allowsCorporateMysql } from './sourceConfig.js';
 import { SourceDiagnosticError, sourceDiagnosticFromError } from './sourceDiagnostics.js';
 import { loadSourceAgentDirectory } from './sourceDirectory.js';
 import { normalizeConversationEvidence } from './sourceEvidence.js';
+import { summarizeMysqlIdentityRows, } from './mysqlIdentityDiagnostics.js';
 import { normalizeAgentUserId, normalizedAgentUserIds, requireConversationId, } from './sourceIdentity.js';
 import { APPROVED_CHAT_QUEUE_NAMES, isApprovedChatCatalogSeed } from './sourcePolicy.js';
 import { normalizeRequestId, validateSourceWindow } from './sourceRequestIdentity.js';
 import { REQUIRED_MYSQL_COLUMNS } from './sourceSchema.js';
 import { placeholders, sourceFailure, toBoolean, toDate } from './sourceClientMapping.js';
 import * as aggregates from './sourceAggregates.js';
-import { MYSQL_CHAT_PROJECTION, mysqlChatRequests, normalizeReportId, publicMysqlChatRequest, sameMysqlChatRequest, } from './mysqlSourceRows.js';
+import { MYSQL_CHAT_PROJECTION, MysqlChatIdentityError, mysqlChatRequestDifferences, mysqlChatRequests, normalizeReportId, publicMysqlChatRequest, sameMysqlChatRequest, } from './mysqlSourceRows.js';
 const CONNECT_TIMEOUT = 10_000;
 const TOPICS_PER_BATCH = 10_000;
 const REQUIRED_COLUMNS = {
@@ -35,14 +36,16 @@ const REQUIRED_COLUMNS = {
 /** Reads the verified report/omni schema without establishing any Mongo connection. */
 export class MysqlChatSourceClient {
     config;
+    observe;
     pool;
     connected = false;
     closed = false;
     needsRecreate = false;
     stopMonitor = null;
     teardown = null;
-    constructor(config) {
+    constructor(config, observe) {
         this.config = config;
+        this.observe = observe;
         const corporateAllowed = allowsCorporateMysql(config);
         if ((config.corporateNetwork && !corporateAllowed) ||
             (!config.mysqlTls && !config.laptopVpn && !corporateAllowed))
@@ -138,6 +141,7 @@ export class MysqlChatSourceClient {
         return rows;
     }
     async siblings(ids) {
+        this.observe?.({ stage: 'sibling_query' });
         const rows = await readCatalogSiblingBatches({
             conversationIds: ids,
             overflow: (kind) => sourceFailure(`sibling ${kind} size`),
@@ -150,10 +154,12 @@ export class MysqlChatSourceClient {
                 return result;
             },
         });
+        if (this.observe)
+            this.observe({ stage: 'sibling_normalization', ...summarizeMysqlIdentityRows(rows) });
         const requests = mysqlChatRequests(rows);
         const allowed = new Set(ids);
         if (requests.some((item) => !allowed.has(item.conversationId)))
-            throw sourceFailure('request identity');
+            throw new MysqlChatIdentityError('sibling_outside_channels');
         return requests;
     }
     async preflight() {
@@ -253,11 +259,10 @@ export class MysqlChatSourceClient {
             for (const row of rows) {
                 const reportId = normalizeReportId(row.reportId);
                 const request = byReport.get(reportId);
-                if (!batch.includes(reportId) ||
-                    !request ||
-                    typeof row.path !== 'string' ||
-                    !row.path.trim())
-                    throw sourceFailure('request identity');
+                if (!batch.includes(reportId) || !request)
+                    throw new MysqlChatIdentityError('topic_report_outside_batch');
+                if (typeof row.path !== 'string' || !row.path.trim())
+                    throw new MysqlChatIdentityError('topic_path_missing');
                 const bytes = Buffer.byteLength(row.path, 'utf8');
                 totalBytes += bytes;
                 if (bytes > 16_384 || totalBytes > 16_000_000)
@@ -273,9 +278,11 @@ export class MysqlChatSourceClient {
     async listCompletedConversations(window) {
         validateSourceWindow(window);
         try {
+            this.observe?.({ stage: 'connection' });
             await this.connect();
             const seedRows = [];
             for (const slice of splitCatalogWindow(window)) {
+                this.observe?.({ stage: 'seed_query' });
                 const rows = await this.seedRows(slice);
                 if (rows.length > CATALOG_LIMITS.recordsPerSlice)
                     throw sourceFailure('catalog slice size');
@@ -283,23 +290,38 @@ export class MysqlChatSourceClient {
                     throw sourceFailure('catalog global size');
                 seedRows.push(...rows);
             }
+            if (this.observe)
+                this.observe({ stage: 'seed_normalization', ...summarizeMysqlIdentityRows(seedRows) });
             const seeds = mysqlChatRequests(seedRows);
-            if (seeds.some((item) => !isApprovedChatCatalogSeed(item)))
-                throw sourceFailure('catalog consistency');
+            const rejected = seeds.filter((item) => !isApprovedChatCatalogSeed(item)).length;
+            this.observe?.({ stage: 'seed_policy', rows: seeds.length, rejected });
+            if (rejected)
+                throw new MysqlChatIdentityError('seed_not_eligible');
             if (!seeds.length)
                 return [];
             const requests = await this.siblings([...new Set(seeds.map((item) => item.conversationId))]);
+            this.observe?.({ stage: 'seed_consistency' });
             const byId = new Map(requests.map((item) => [item.requestId, item]));
             for (const seed of seeds) {
                 const current = byId.get(seed.requestId);
-                if (!current || !sameMysqlChatRequest(seed, current))
-                    throw sourceFailure('catalog consistency');
+                if (!current)
+                    throw new MysqlChatIdentityError('seed_missing_from_siblings');
+                if (!sameMysqlChatRequest(seed, current))
+                    throw new MysqlChatIdentityError('seed_changed_between_reads', mysqlChatRequestDifferences(seed, current));
             }
+            this.observe?.({ stage: 'message_counts' });
             const result = await aggregates.loadRequestAggregates(requests, (item) => item.conversationId, (item) => item.messageConversationId, (ids) => this.counts(ids));
             if (!result.requests.length)
-                throw sourceFailure('catalog consistency');
+                throw new MysqlChatIdentityError('no_complete_message_counts');
+            this.observe?.({ stage: 'topics' });
             await this.addTopics(result.requests);
+            this.observe?.({ stage: 'agent_directory' });
             const directory = await loadSourceAgentDirectory(this.pool, normalizedAgentUserIds(result.requests.map((item) => item.agentUserId)));
+            this.observe?.({
+                stage: 'complete',
+                rows: result.requests.length,
+                missingAgents: normalizedAgentUserIds(result.requests.map((item) => item.agentUserId)).filter((id) => !directory.has(id)).length,
+            });
             return result.requests.map((request) => ({
                 ...publicMysqlChatRequest(request),
                 ...result.aggregates.get(request.conversationId),
@@ -308,6 +330,8 @@ export class MysqlChatSourceClient {
             }));
         }
         catch (error) {
+            if (error instanceof SourceDiagnosticError)
+                throw error;
             throw new SourceDiagnosticError(sourceDiagnosticFromError(error));
         }
     }
