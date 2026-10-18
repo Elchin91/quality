@@ -89,14 +89,22 @@ export function loadChatSourceConfig(env) {
     const enabled = parseBoolean(env.CHAT_SOURCE_ENABLED, 'CHAT_SOURCE_ENABLED', false);
     if (!enabled)
         return null;
-    for (const key of REQUIRED_KEYS)
+    const backend = env.CHAT_SOURCE_BACKEND?.trim() || 'mongo_mysql';
+    if (backend !== 'mysql' && backend !== 'mongo_mysql')
+        throw new Error('invalid configuration: CHAT_SOURCE_BACKEND');
+    for (const key of REQUIRED_KEYS) {
+        if (backend === 'mysql' && key.startsWith('CHAT_SOURCE_MONGO_'))
+            continue;
         required(env, key);
+    }
     const production = env.NODE_ENV === 'production';
     const vpnRequested = parseBoolean(env.CHAT_SOURCE_VPN_PROFILE, 'CHAT_SOURCE_VPN_PROFILE', false);
     const laptopVpn = vpnRequested && env.AGENTSCORE_LAPTOP_PROFILE === '1';
     if (vpnRequested && !laptopVpn)
         throw new Error('invalid configuration: CHAT_SOURCE_VPN_PROFILE');
-    const mongoUri = parseMongoUri(required(env, 'CHAT_SOURCE_MONGO_URI'), production && !laptopVpn, laptopVpn);
+    const mongoUri = backend === 'mysql'
+        ? ''
+        : parseMongoUri(required(env, 'CHAT_SOURCE_MONGO_URI'), production && !laptopVpn, laptopVpn);
     const mysqlTls = parseBoolean(required(env, 'CHAT_SOURCE_MYSQL_TLS'), 'CHAT_SOURCE_MYSQL_TLS', true);
     if (production && !laptopVpn && !mysqlTls)
         throw new Error('invalid configuration: CHAT_SOURCE_MYSQL_TLS');
@@ -105,8 +113,9 @@ export function loadChatSourceConfig(env) {
         throw new Error('invalid configuration: CHAT_SOURCE_MYSQL_HOST');
     return {
         enabled: true,
+        backend,
         mongoUri,
-        mongoDatabase: required(env, 'CHAT_SOURCE_MONGO_DATABASE'),
+        mongoDatabase: backend === 'mysql' ? '' : required(env, 'CHAT_SOURCE_MONGO_DATABASE'),
         mysqlHost,
         mysqlPort: parsePort(required(env, 'CHAT_SOURCE_MYSQL_PORT')),
         mysqlUser: required(env, 'CHAT_SOURCE_MYSQL_USER'),

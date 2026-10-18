@@ -6,6 +6,7 @@ import { createSecretKey } from 'node:crypto';
 import { loadChatSourceConfig } from '../chatQa/sourceConfig.js';
 import { listCallCatalog } from './catalog.js';
 import { createMongoCallSourceAdapter } from './mongoSource.js';
+import { createMysqlCallSourceAdapter } from './mysqlSource.js';
 import { appendCallQaOperationalEvent } from './operationalEvents.js';
 import { createFfprobeRecordingProbe } from './recordingProbe.js';
 import { openAdminCallRecording, openReviewerCallRecording } from './recordingAccess.js';
@@ -34,7 +35,11 @@ function loadState(options) {
                 normalizationProtection = {
                     externalAgentIdHmacKey: createSecretKey(chat.samplingHmacSecret),
                 };
-                configuredSource = createMongoCallSourceAdapter(callSourceConfigFromChatSource(chat));
+                const sourceConfig = callSourceConfigFromChatSource(chat);
+                configuredSource =
+                    chat.backend === 'mysql'
+                        ? createMysqlCallSourceAdapter(sourceConfig)
+                        : createMongoCallSourceAdapter(sourceConfig);
             }
         }
         catch {

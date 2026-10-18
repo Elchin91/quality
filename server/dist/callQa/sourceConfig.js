@@ -10,8 +10,7 @@ export function callSourceConfigFromChatSource(source) {
     const mysqlPassword = source.mysqlPassword;
     const mysqlDatabase = source.mysqlDatabase.trim();
     if (source.enabled !== true ||
-        !mongoUri ||
-        !mongoDatabase ||
+        (source.backend !== 'mysql' && (!mongoUri || !mongoDatabase)) ||
         !mysqlHost ||
         !Number.isInteger(source.mysqlPort) ||
         source.mysqlPort < 1 ||
@@ -24,6 +23,7 @@ export function callSourceConfigFromChatSource(source) {
     }
     return Object.freeze({
         enabled: true,
+        backend: source.backend,
         mongoUri,
         mongoDatabase,
         mysqlHost,
