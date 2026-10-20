@@ -1,3 +1,4 @@
+import { loadRecordingConfig } from '../callQa/recordingConfig.js';
 export function allowsCorporateMysql(config) {
     return config.corporateNetwork === true && config.backend === 'mysql' &&
         config.mysqlHost === '192.168.46.4' && !config.laptopVpn;
@@ -94,6 +95,12 @@ export function loadChatSourceConfig(env) {
     if (!enabled)
         return null;
     const backend = env.CHAT_SOURCE_BACKEND?.trim() || 'mongo_mysql';
+    if (backend === 'http') {
+        return { enabled: true, backend, http: { ...loadRecordingConfig(env), timeoutMs: parseQueryTimeout(env.CHAT_SOURCE_QUERY_TIMEOUT_MS), maxBytes: 4_000_000 },
+            mongoUri: '', mongoDatabase: '', mysqlHost: '', mysqlPort: 3306, mysqlUser: '', mysqlPassword: '', mysqlDatabase: '', mysqlTls: true,
+            queryTimeoutMs: parseQueryTimeout(env.CHAT_SOURCE_QUERY_TIMEOUT_MS),
+            samplingHmacSecret: parseBase64(required(env, 'CHAT_SAMPLING_HMAC_SECRET')) };
+    }
     if (backend !== 'mysql' && backend !== 'mongo_mysql')
         throw new Error('invalid configuration: CHAT_SOURCE_BACKEND');
     for (const key of REQUIRED_KEYS) {

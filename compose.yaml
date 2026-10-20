@@ -17,8 +17,9 @@ services:
       CORS_ORIGINS: "${QUALITY_PUBLIC_ORIGIN:-http://192.168.68.41:8787}"
       QUALITY_INTERNAL_HTTP: "${QUALITY_INTERNAL_HTTP:-true}"
       TRUST_PROXY: "${QUALITY_TRUST_PROXY:-0}"
-      # Corporate MySQL profile: existing credentials stay in the server's .env.
-      CHAT_SOURCE_BACKEND: mysql
+      # HTTP chats are opt-in; calls retain their existing MySQL source.
+      CHAT_SOURCE_BACKEND: "${CHAT_SOURCE_BACKEND:-mysql}"
+      CALL_SOURCE_BACKEND: "${CALL_SOURCE_BACKEND:-mysql}"
       CHAT_SOURCE_CORPORATE_PROFILE: "true"
       CHAT_SOURCE_MYSQL_TLS: "${CHAT_SOURCE_MYSQL_TLS:-false}"
       CHAT_SOURCE_VPN_PROFILE: "false"

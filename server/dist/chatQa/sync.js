@@ -1,3 +1,4 @@
+import { hasLegacyRequestOwner } from './httpLegacyOwnership.js';
 import { nanoid } from 'nanoid';
 import { buildChatCatalog, uniqueSorted } from './catalog.js';
 import { CHAT_SYNC_LEASE_MS } from './schema.js';
@@ -48,7 +49,7 @@ function planConversation(db, conversation, minClientMessages, minAgentMessages)
         mappedAgentId === null) {
         reasons.push('unmapped_agent');
     }
-    if (isDuplicate(db, conversation.conversationId))
+    if (isDuplicate(db, conversation.conversationId) || hasLegacyRequestOwner(db, conversation))
         reasons.push('duplicate');
     return {
         ...conversation,
@@ -73,6 +74,8 @@ function hasLiveTask(db, interactionId) {
         .get(interactionId));
 }
 function persistConversation(db, conversation, runId, now) {
+    if (hasLegacyRequestOwner(db, conversation))
+        return;
     const existing = db
         .prepare('SELECT id FROM source_interactions WHERE source_system=? AND conversation_id=?')
         .get(SOURCE_SYSTEM, conversation.conversationId);
@@ -114,7 +117,7 @@ function persistConversation(db, conversation, runId, now) {
             throw new Error('chat source request identity conflict');
     }
 }
-/** Synchronizes metadata-only chat catalog state without loading message bodies. */
+/** Persists catalog metadata; HTTP adapters transiently read messages to verify eligibility. */
 export async function syncChatCatalog(input) {
     if (input.db.inTransaction) {
         throw new Error('Chat catalog synchronization cannot run inside a transaction');
@@ -192,7 +195,7 @@ export async function syncChatCatalog(input) {
     try {
         let rows;
         try {
-            const health = await input.source.preflight();
+            const health = await input.source.preflight(input.signal);
             input.signal?.throwIfAborted();
             input.assertOwnership?.();
             if (!health.ok) {
@@ -200,7 +203,7 @@ export async function syncChatCatalog(input) {
                 const message = SOURCE_DIAGNOSTICS[code];
                 return finalizeSyncResult(input.db, runResult(runId, mode, 'failed', window, empty, code, message, health.errorDetails), syncClockMs(input.clock), leaseGeneration);
             }
-            rows = await input.source.listCompletedConversations(window);
+            rows = await input.source.listCompletedConversations(window, input.signal);
             input.signal?.throwIfAborted();
             input.assertOwnership?.();
         }
@@ -236,7 +239,7 @@ export async function syncChatCatalog(input) {
             minClientMessages = policy.min_client_messages;
             minAgentMessages = policy.min_agent_messages;
             planned = catalog.map((conversation) => planConversation(input.db, conversation, minClientMessages, minAgentMessages));
-            mutableCatalog = catalog.filter((row) => !isDuplicate(input.db, row.conversationId));
+            mutableCatalog = catalog.filter((row) => !isDuplicate(input.db, row.conversationId) && !hasLegacyRequestOwner(input.db, row));
             const externalIds = uniqueSorted(mutableCatalog.flatMap((row) => row.externalAgentIds));
             const existingMappings = countExistingCatalogMappings(input.db, externalIds);
             const eligibleCount = planned.filter((row) => row.eligibilityState === 'eligible').length;

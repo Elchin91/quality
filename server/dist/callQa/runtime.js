@@ -31,7 +31,10 @@ function loadState(options) {
     let configuredSource = null;
     if (!normalizationProtection) {
         try {
-            const chat = loadChatSourceConfig(options.env);
+            // Chat HTTP transport is independent of the existing call catalog's database source.
+            const chat = loadChatSourceConfig(options.env.CHAT_SOURCE_BACKEND?.trim() === 'http'
+                ? { ...options.env, CHAT_SOURCE_BACKEND: options.env.CALL_SOURCE_BACKEND || 'mysql' }
+                : options.env);
             if (chat) {
                 normalizationProtection = {
                     externalAgentIdHmacKey: createSecretKey(chat.samplingHmacSecret),

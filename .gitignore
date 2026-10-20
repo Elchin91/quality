@@ -12,3 +12,4 @@ server/data/
 *.log
 *.pem
 *.key
+*.har

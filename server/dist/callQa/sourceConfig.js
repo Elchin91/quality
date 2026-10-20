@@ -3,6 +3,8 @@ export const CALL_SOURCE_MAX_PAGE_SIZE = 100;
 export const CALL_SOURCE_MAX_ROWS = 5_000;
 /** Reuses only the established read-only source connections and excludes sampling secrets. */
 export function callSourceConfigFromChatSource(source) {
+    if (source.backend === 'http')
+        throw new Error('invalid call source configuration');
     const mongoUri = source.mongoUri.trim();
     const mongoDatabase = source.mongoDatabase.trim();
     const mysqlHost = source.mysqlHost.trim();

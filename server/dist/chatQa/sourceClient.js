@@ -1,5 +1,4 @@
 import { MongoClient } from 'mongodb';
-import { MysqlChatSourceClient } from './mysqlSource.js';
 import mysql from 'mysql2/promise';
 import { boundedSqlLimit } from '../sourceSqlLimit.js';
 import { assertLaptopVpnRoute, assertLaptopVpnSourceEndpoints, monitorLaptopVpnRoute, } from '../sourceVpnRoute.js';
@@ -372,8 +371,4 @@ export class MongoMysqlChatSourceClient {
         await this.invalidateConnections();
     }
 }
-export function createChatSourceClient(config) {
-    return config.backend === 'mysql'
-        ? new MysqlChatSourceClient(config)
-        : new MongoMysqlChatSourceClient(config);
-}
+export { createChatSourceClient } from './sourceFactory.js';
