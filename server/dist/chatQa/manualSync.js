@@ -1,8 +1,10 @@
 import { nanoid } from 'nanoid';
 import { DurableJobRepository } from '../jobs/repository.js';
+import { boundedOperation } from '../jobs/boundedOperation.js';
 import { syncChatCatalog } from './sync.js';
-import { sourceDiagnosticFromError, sourceFailureDetailsFromError } from './sourceDiagnostics.js';
+import { SourceDiagnosticError, sourceDiagnosticFromError, sourceFailureDetailsFromError, } from './sourceDiagnostics.js';
 import { sourceFailureDetailsDto, sourceFailureDetailsJson } from './sourceFailureDetails.js';
+import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 const MIN_CHUNK_MS = 60_000;
 function read(db, id) {
     return id
@@ -39,6 +41,29 @@ function enqueueChunk(db, row, now) {
     });
     db.prepare('UPDATE chat_source_sync_operations SET job_id=?,updated_at=? WHERE id=?').run(job.id, now, row.id);
 }
+function shrinkChunk(db, row, width, now) {
+    db.prepare("UPDATE chat_source_sync_operations SET status='queued',batch_window_ms=?,updated_at=? WHERE id=?").run(Math.max(MIN_CHUNK_MS, Math.floor(width / 2)), now, row.id);
+    enqueueChunk(db, read(db, row.id), now);
+}
+async function executeChunk(input, sync, timeoutMs) {
+    if (timeoutMs === undefined)
+        return sync(input);
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5 * 60_000)
+        throw new Error('invalid source batch duration');
+    let chunkSignal;
+    try {
+        return await boundedOperation(input.signal, timeoutMs, (signal) => {
+            chunkSignal = signal;
+            return sync({ ...input, signal });
+        });
+    }
+    catch (error) {
+        input.signal.throwIfAborted();
+        if (chunkSignal?.aborted)
+            throw new SourceDiagnosticError('source_query_timeout');
+        throw error;
+    }
+}
 /** Submission performs no upstream work; the durable worker reconnects later. */
 export function enqueueManualChatSync(input) {
     const { db, now } = input;
@@ -53,19 +78,11 @@ export function enqueueManualChatSync(input) {
                 return dto(effective);
             db.prepare("UPDATE chat_source_sync_operations SET status='failed',error_code='sync_cancelled',completed_at=? WHERE id=?").run(now, active.id);
         }
-        const policy = db
-            .prepare('SELECT overlap_days FROM chat_sampling_policy WHERE id=1')
-            .get();
-        const watermark = db
-            .prepare(`SELECT window_to FROM chat_sync_runs WHERE mode='apply'
-      AND status='succeeded' AND completed_at IS NOT NULL AND catalog_scope='full' AND window_to<=?
-      ORDER BY window_to DESC LIMIT 1`)
-            .get(now);
-        const start = Math.max(0, (watermark?.window_to ?? now) - policy.overlap_days * 86_400_000);
+        const { start, end } = previousBakuDay(now);
         const id = nanoid();
         db.prepare(`INSERT INTO chat_source_sync_operations
       (id,mode,status,requested_by,window_from,window_to,cursor_at,created_at,updated_at)
-      VALUES (?,?,'queued',?,?,?,?,?,?)`).run(id, input.dryRun ? 'dry_run' : 'apply', input.actorUserId, start, now, start, now, now);
+      VALUES (?,?,'queued',?,?,?,?,?,?)`).run(id, input.dryRun ? 'dry_run' : 'apply', input.actorUserId, start, end, start, now, now);
         enqueueChunk(db, read(db, id), now);
         return getManualChatSync(db, id);
     })
@@ -75,7 +92,7 @@ export function enqueueManualChatSync(input) {
 export async function runManualChatSync(input) {
     const { db, signal } = input;
     const clock = input.clock ?? (() => new Date());
-    const operation = read(db, input.id);
+    let operation = read(db, input.id);
     if (!operation || !['queued', 'running'].includes(operation.status))
         return;
     signal.throwIfAborted();
@@ -85,14 +102,33 @@ export async function runManualChatSync(input) {
         .get(clock().getTime());
     if (activeRun)
         throw new Error('sync_in_progress');
+    const reviewDay = previousBakuDay(operation.created_at);
+    if (operation.window_from !== reviewDay.start || operation.window_to !== reviewDay.end) {
+        // Upgrade an unfinished legacy backlog without deleting any imported records/tasks.
+        db.prepare(`UPDATE chat_source_sync_operations
+      SET window_from=?,window_to=?,cursor_at=?,chunks_completed=0,conversations_seen=0,
+          eligible_count=0,excluded_count=0,error_code=NULL,error_details_json=NULL WHERE id=?`).run(reviewDay.start, reviewDay.end, reviewDay.start, operation.id);
+        operation = read(db, input.id);
+    }
     db.prepare("UPDATE chat_source_sync_operations SET status='running',updated_at=? WHERE id=?").run(clock().getTime(), operation.id);
-    const end = Math.min(operation.window_to, operation.cursor_at + operation.batch_window_ms);
+    let end = Math.min(operation.window_to, operation.cursor_at + operation.batch_window_ms);
+    let boundedSource = false;
     try {
         const source = await input.source();
         signal.throwIfAborted();
         if (!source)
             throw new Error('chat source connection failed');
-        const result = await (input.sync ?? syncChatCatalog)({
+        const sourceWindow = source.maxSyncWindowMs;
+        if (sourceWindow !== undefined) {
+            if (!Number.isSafeInteger(sourceWindow) ||
+                sourceWindow < MIN_CHUNK_MS ||
+                sourceWindow > 7 * 86_400_000)
+                throw new Error('invalid source batch window');
+            // Apply the cap at execution time so pre-upgrade queued jobs benefit too.
+            end = Math.min(end, operation.cursor_at + sourceWindow);
+            boundedSource = true;
+        }
+        const result = await executeChunk({
             db,
             source,
             signal,
@@ -102,8 +138,8 @@ export async function runManualChatSync(input) {
             operationId: operation.id,
             assertOwnership: input.assertOwnership,
             window: { start: new Date(operation.cursor_at), end: new Date(end) },
-            mappingConfirmationActorUserId: operation.requested_by,
-        });
+            mappingConfirmationActorUserId: operation.requested_by === 'system:daily' ? undefined : operation.requested_by,
+        }, input.sync ?? syncChatCatalog, source.maxSyncDurationMs);
         signal.throwIfAborted();
         input.assertOwnership?.();
         db.transaction(() => {
@@ -114,9 +150,10 @@ export async function runManualChatSync(input) {
                 !['queued', 'running'].includes(current.status))
                 return;
             const width = end - operation.cursor_at;
-            if (result.errorCode === 'source_catalog_limit' && width > MIN_CHUNK_MS) {
-                db.prepare("UPDATE chat_source_sync_operations SET status='queued',batch_window_ms=?,updated_at=? WHERE id=?").run(Math.max(MIN_CHUNK_MS, Math.floor(width / 2)), clock().getTime(), operation.id);
-                enqueueChunk(db, read(db, operation.id), clock().getTime());
+            if ((result.errorCode === 'source_catalog_limit' ||
+                (sourceWindow !== undefined && result.errorCode === 'source_query_timeout')) &&
+                width > MIN_CHUNK_MS) {
+                shrinkChunk(db, operation, width, clock().getTime());
                 return;
             }
             const succeeded = result.status === 'succeeded';
@@ -133,6 +170,17 @@ export async function runManualChatSync(input) {
         input.assertOwnership?.();
         if (error instanceof Error && ['sync_in_progress', 'sync_lease_lost'].includes(error.message))
             throw error;
+        if (boundedSource &&
+            sourceDiagnosticFromError(error) === 'source_query_timeout' &&
+            end - operation.cursor_at > MIN_CHUNK_MS) {
+            db.transaction(() => {
+                const current = read(db, operation.id);
+                if (current?.cursor_at === operation.cursor_at &&
+                    ['queued', 'running'].includes(current.status))
+                    shrinkChunk(db, current, end - operation.cursor_at, clock().getTime());
+            }).immediate();
+            return;
+        }
         db.prepare("UPDATE chat_source_sync_operations SET status='failed',error_code=?,error_details_json=?,completed_at=?,updated_at=? WHERE id=? AND cursor_at=?").run(sourceDiagnosticFromError(error), sourceFailureDetailsJson(sourceFailureDetailsFromError(error)), clock().getTime(), clock().getTime(), operation.id, operation.cursor_at);
     }
 }

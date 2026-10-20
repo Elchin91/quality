@@ -1,7 +1,7 @@
 import { runChatQaCycle } from '../chatQa/scheduler.js';
 import { refreshCurrentRoster } from '../qaAutomation/googleSheets.js';
 import { autoLinkRosterPeople, readRosterSnapshot } from '../qaAutomation/repository.js';
-import { bakuMonth } from '../qaAutomation/types.js';
+import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { boundedOperation } from './boundedOperation.js';
 const ROSTER_REFRESH_MS = 60 * 60_000;
 /** Each source is isolated so a lost VPN leg cannot suppress the other channel. */
@@ -19,7 +19,7 @@ export async function runQaAutomationCycle(input) {
         .prepare('SELECT enabled FROM qa_automation_settings WHERE id=1')
         .get();
     const assignEnabled = assignmentSetting?.enabled === 1;
-    const previous = readRosterSnapshot(input.db, bakuMonth(now.getTime()));
+    const previous = readRosterSnapshot(input.db, previousBakuDay(now).date.slice(0, 7));
     if (previous && now.getTime() - previous.fetchedAtMs < ROSTER_REFRESH_MS) {
         try {
             autoLinkRosterPeople(input.db, previous.month, now.getTime());

@@ -1,6 +1,7 @@
 import { getAutomationEnabled, readRosterSnapshot, rosterIsFresh } from './repository.js';
-import { mixedChannelQuota, monthlyAssignedTaskCounts } from './channelQuota.js';
-import { bakuMonth, cumulativeShiftTarget, MONTHLY_EVALUATION_TARGET, shiftStartMs, } from './types.js';
+import { monthlyAssignedTaskCounts } from './channelQuota.js';
+import { previousBakuDay } from './reviewWindow.js';
+import { bakuMonth, bakuMonthBounds, cumulativeShiftTarget, MONTHLY_EVALUATION_TARGET, shiftStartMs, shiftEndMs, } from './types.js';
 function clockMs(now) {
     const value = now instanceof Date ? now.getTime() : now;
     if (!Number.isSafeInteger(value) || value < 0)
@@ -32,41 +33,51 @@ function counts(db, agentId, month) {
         used: chat.total + call.total,
     };
 }
-/** Shared hard cap for all new Chat and Call QA tasks, independent of roster availability. */
-export function operatorMonthlyCapacity(db, agentId, now) {
+/** Shared hard cap in the contact's Baku month, independent of roster availability. */
+export function operatorMonthlyCapacity(db, agentId, recordDate) {
     if (!agentId)
         throw new Error('invalid quota subject');
-    const month = bakuMonth(clockMs(now));
+    const month = bakuMonth(clockMs(recordDate));
     const { used } = counts(db, agentId, month);
     return { month, used, remaining: Math.max(0, MONTHLY_EVALUATION_TARGET - used) };
 }
-/** Manual and legacy assignments retain the mixed operator's 10-per-channel ceiling. */
-export function operatorChannelCapacity(db, agentId, now, channel) {
+/** Both channels draw from the same operator budget; no mandatory 10+10 split. */
+export function operatorChannelCapacity(db, agentId, recordDate, channel) {
     if (!agentId || !['chat', 'call'].includes(channel))
         throw new Error('invalid quota subject');
-    const month = bakuMonth(clockMs(now));
+    const month = bakuMonth(clockMs(recordDate));
     const snapshot = tableExists(db, 'qa_roster_snapshots') ? readRosterSnapshot(db, month) : null;
     const link = snapshot ? rosterLink(db, agentId, month) : undefined;
     const mixed = snapshot?.people.find((person) => person.key === link?.person_key)?.channel === 'mixed';
     const used = monthlyAssignedTaskCounts(db, agentId, month, channel).total;
-    return { mixed, used, remaining: Math.max(0, (mixed ? 10 : 20) - used) };
+    return { mixed, used, remaining: operatorMonthlyCapacity(db, agentId, recordDate).remaining };
 }
 function result(db, person, agentId, linkOrigin, month, nowMs, fresh, enabled, requestedChannel) {
-    const begunShifts = person.shifts.filter((shift) => shiftStartMs(shift) <= nowMs).length;
+    const reviewDay = previousBakuDay(nowMs);
+    const monthStart = bakuMonthBounds(month).start;
+    let shifts = person.shifts;
+    let carryFresh = true;
+    const previous = readRosterSnapshot(db, bakuMonth(monthStart - 1));
+    const previousPerson = previous?.people.find((entry) => entry.key === person.key);
+    const carry = previousPerson?.shifts.filter((shift) => shiftEndMs(shift) > monthStart) ?? [];
+    if (carry.length) {
+        shifts = [...carry, ...shifts];
+        if (reviewDay.start === monthStart)
+            carryFresh = rosterIsFresh(previous, nowMs);
+    }
+    const begunShifts = shifts.filter((shift) => shiftStartMs(shift) < reviewDay.end).length;
+    const workedPreviousDay = shifts.some((shift) => shiftStartMs(shift) < reviewDay.end && shiftEndMs(shift) > reviewDay.start);
     const hasUnknownShift = person.invalidShiftDates.length > 0;
-    const due = hasUnknownShift ? 0 : cumulativeShiftTarget(person.shifts, nowMs);
+    const due = hasUnknownShift ? 0 : cumulativeShiftTarget(shifts, reviewDay.end - 1);
     const { completed, open, used } = agentId
         ? counts(db, agentId, month)
         : { completed: 0, open: 0, used: 0 };
-    const totalRemaining = hasUnknownShift
+    const totalRemaining = hasUnknownShift || !workedPreviousDay
         ? 0
         : Math.max(0, Math.min(MONTHLY_EVALUATION_TARGET, due) - used);
-    const channelQuota = person.channel === 'mixed' && agentId && requestedChannel && totalRemaining > 0
-        ? mixedChannelQuota(db, agentId, month, requestedChannel, due, totalRemaining)
-        : { remaining: totalRemaining, fallback: false };
-    const remaining = channelQuota.remaining;
+    const remaining = totalRemaining;
     let reason;
-    if (!fresh)
+    if (!fresh || !carryFresh)
         reason = 'roster_stale';
     else if (!agentId)
         reason = 'unmapped';
@@ -74,7 +85,7 @@ function result(db, person, agentId, linkOrigin, month, nowMs, fresh, enabled, r
         reason = 'unknown_shift';
     else if (requestedChannel && person.channel !== 'mixed' && person.channel !== requestedChannel)
         reason = 'channel_mismatch';
-    else if (!person.shifts.length)
+    else if (!shifts.length)
         reason = 'no_shifts';
     else if (used >= MONTHLY_EVALUATION_TARGET)
         reason = 'target_reached';
@@ -99,11 +110,11 @@ function result(db, person, agentId, linkOrigin, month, nowMs, fresh, enabled, r
         completed,
         open,
         remaining,
-        totalShifts: person.shifts.length,
+        totalShifts: shifts.length,
         begunShifts,
         invalidShiftDates: person.invalidShiftDates,
         reason,
-        channelFallback: channelQuota.fallback,
+        channelFallback: false,
     };
 }
 function emptyQuota(month, agentId, reason) {
@@ -131,7 +142,7 @@ export function quotaFor(db, agentId, now, channel) {
     if (!agentId || !['chat', 'call'].includes(channel))
         throw new Error('invalid quota subject');
     const nowMs = clockMs(now);
-    const month = bakuMonth(nowMs);
+    const month = previousBakuDay(nowMs).date.slice(0, 7);
     const snapshot = readRosterSnapshot(db, month);
     if (!snapshot)
         return emptyQuota(month, agentId, 'roster_unavailable');
@@ -144,7 +155,7 @@ export function quotaFor(db, agentId, now, channel) {
 /** Read-only preview includes unconfirmed people without exposing their schedule to reviewers. */
 export function listRosterQuota(db, now) {
     const nowMs = clockMs(now);
-    const month = bakuMonth(nowMs);
+    const month = previousBakuDay(nowMs).date.slice(0, 7);
     const snapshot = readRosterSnapshot(db, month);
     if (!snapshot)
         return [];

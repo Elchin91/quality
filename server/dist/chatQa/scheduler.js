@@ -3,9 +3,9 @@ import { nanoid } from 'nanoid';
 import { sampleAutomaticTasks } from './assignment.js';
 import { samplingInput } from './samplingRepository.js';
 import { createAutomaticTask } from './service.js';
-import { syncChatCatalog } from './sync.js';
 import { purgeExpiredAppEvents, writeAppEventIfReady } from '../realtime/appEvents.js';
-import { bakuMonth, bakuMonthBounds } from '../qaAutomation/types.js';
+import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { syncPreviousDay } from './dailySync.js';
 import { listRosterQuota, quotaFor } from '../qaAutomation/quota.js';
 import { CHAT_SCHEDULER_LEASE_MS } from './schema.js';
 import { assertSchedulerLease, persistSchedulerLeaseFailure, startSchedulerHeartbeat, } from './syncLease.js';
@@ -196,21 +196,16 @@ export async function runChatQaCycle(input) {
             .get();
         let tasksCreated = 0;
         let syncStatus = null;
+        let catalogQueued = false;
         if (settings.enabled === 1 || input.rosterMode) {
             if (input.signal?.aborted)
                 throw new Error('job aborted');
-            if (input.syncCatalog !== false)
-                syncStatus = (await (input.sync ?? syncChatCatalog)({
-                    db: input.db,
-                    source: input.source,
-                    clock,
-                    dryRun: false,
-                    overlapDays: settings.overlap_days,
-                    catalogScope: input.rosterMode ? 'roster_month' : 'full',
-                    signal: input.signal,
-                })).status;
+            const catalog = await syncPreviousDay({ ...input, clock });
+            syncStatus = catalog.status;
+            catalogQueued = catalog.queued;
             assertSchedulerLease(input.db, runId, leaseGeneration, nowFrom(clock).getTime());
-            if ((syncStatus === null || syncStatus === 'succeeded') &&
+            if (!catalogQueued &&
+                (syncStatus === null || syncStatus === 'succeeded') &&
                 (!input.rosterMode || input.rosterAssignmentsEnabled === true)) {
                 if (input.signal?.aborted)
                     throw new Error('job aborted');
@@ -222,15 +217,13 @@ export async function runChatQaCycle(input) {
                         quotaFor(input.db, row.agentId, now, 'chat').remaining,
                     ]))
                     : undefined;
-                const month = bakuMonthBounds(bakuMonth(now.getTime()));
-                const sampled = samplingInput(input.db, now);
+                const reviewDay = previousBakuDay(now);
+                const sampled = samplingInput(input.db, new Date(reviewDay.start));
                 const proposals = sampleAutomaticTasks({
                     ...sampled,
-                    candidates: input.rosterMode
-                        ? sampled.candidates.filter((candidate) => candidate.completedAtUtc !== undefined &&
-                            candidate.completedAtUtc >= month.start &&
-                            candidate.completedAtUtc < month.end)
-                        : sampled.candidates,
+                    candidates: sampled.candidates.filter((candidate) => candidate.completedAtUtc !== undefined &&
+                        candidate.completedAtUtc >= reviewDay.start &&
+                        candidate.completedAtUtc < reviewDay.end),
                     monthlyTarget: 20,
                     reviewerOpenCap: settings.reviewer_open_cap,
                     maxAssignmentsByAgent: rosterRemaining,
@@ -268,7 +261,7 @@ export async function runChatQaCycle(input) {
             purgeExpiredAppEvents(input.db, nowFrom(clock).getTime());
         result = {
             status: syncStatus === null || syncStatus === 'succeeded' ? 'succeeded' : 'failed',
-            ...(syncStatus === null ? {} : { syncStatus }),
+            ...(catalogQueued ? { syncStatus: 'queued' } : syncStatus === null ? {} : { syncStatus }),
             tasksCreated,
             sla,
             purged,

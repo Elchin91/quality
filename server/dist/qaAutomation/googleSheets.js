@@ -1,6 +1,7 @@
 import { parseRosterCsv } from './rosterParser.js';
-import { saveRosterCsv } from './repository.js';
-import { bakuMonth } from './types.js';
+import { readRosterSnapshot, rosterIsFresh, saveRosterCsv } from './repository.js';
+import { bakuMonth, bakuMonthBounds } from './types.js';
+import { previousBakuDay } from './reviewWindow.js';
 const SPREADSHEET_ID = '1Op_ql7ry7sL6-4_j_-byBzTTJ0PAE1vNDwTDBILwnXs';
 const OCTOBER_2026_GID = '1515823151';
 const DOCUMENT_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}`;
@@ -35,7 +36,9 @@ export function discoverSheetGids(html) {
 /** Reads only the sheet whose date headers and required sections match this Baku month. */
 export async function fetchCurrentRosterCsv(input = {}) {
     const nowMs = input.now instanceof Date ? input.now.getTime() : (input.now ?? Date.now());
-    const month = bakuMonth(nowMs);
+    const month = input.month ?? bakuMonth(nowMs);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month))
+        throw new Error('invalid roster month');
     const fetcher = input.fetcher ?? fetch;
     input.signal?.throwIfAborted();
     const signal = () => input.signal
@@ -87,7 +90,31 @@ export async function fetchCurrentRosterCsv(input = {}) {
     return chosen;
 }
 export async function refreshCurrentRoster(db, input = {}) {
-    const csv = await fetchCurrentRosterCsv(input);
+    const now = input?.now ?? Date.now();
+    const nowMs = now instanceof Date ? now.getTime() : now;
+    const reviewDay = previousBakuDay(now);
+    const month = input?.month ?? reviewDay.date.slice(0, 7);
+    const csv = await fetchCurrentRosterCsv({
+        ...input,
+        now,
+        month,
+    });
+    // The first contact day can include a night shift that started in the preceding month.
+    let carryCsv = null;
+    if (reviewDay.start === bakuMonthBounds(month).start) {
+        const carryMonth = bakuMonth(reviewDay.start - 1);
+        const previous = readRosterSnapshot(db, carryMonth);
+        if (!previous || !rosterIsFresh(previous, nowMs)) {
+            carryCsv = await fetchCurrentRosterCsv({
+                ...input,
+                now,
+                month: carryMonth,
+                candidateGids: previous ? [previous.sourceGid] : undefined,
+            });
+        }
+    }
     input?.signal?.throwIfAborted();
+    if (carryCsv)
+        saveRosterCsv(db, carryCsv);
     return saveRosterCsv(db, csv);
 }

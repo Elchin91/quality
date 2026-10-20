@@ -30,6 +30,18 @@ export function shiftStartMs(shift) {
     }
     return dateMs + Number(time[1]) * 3_600_000 + Number(time[2]) * 60_000 - 4 * 3_600_000;
 }
+export function shiftEndMs(shift) {
+    const start = shiftStartMs(shift);
+    const time = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(shift.endsAt);
+    if (!time)
+        throw new Error('invalid roster shift end');
+    const startMinutes = Number(shift.startsAt.slice(0, 2)) * 60 + Number(shift.startsAt.slice(3));
+    const endMinutes = Number(time[1]) * 60 + Number(time[2]);
+    const durationMinutes = (endMinutes - startMinutes + 1_440) % 1_440;
+    if (!durationMinutes)
+        throw new Error('invalid zero-length roster shift');
+    return start + durationMinutes * 60_000;
+}
 export function cumulativeShiftTarget(shifts, nowMs) {
     if (!shifts.length)
         return 0;

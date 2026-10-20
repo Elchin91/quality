@@ -1,4 +1,5 @@
 import { nanoid } from 'nanoid';
+import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { operatorChannelCapacity, operatorMonthlyCapacity, quotaFor, } from '../qaAutomation/quota.js';
 import { assignmentExplanation, configuredDefaultCapacity, selectReviewerAndAdvance, } from '../reviewerAssignment/repository.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
@@ -131,9 +132,12 @@ export function assignAutomaticCallQaTask(input) {
                 (evaluationsExist &&
                     db.prepare('SELECT 1 FROM evaluations WHERE source_ref=?').get(`call-qa:${source.id}`)))
                 fail('duplicate_task');
-            if (operatorMonthlyCapacity(db, source.agent_id, now.ms).remaining === 0)
+            if (enforceRosterQuota && source.baku_date !== previousBakuDay(now.ms).date)
+                fail('source_ineligible');
+            const recordTime = Date.parse(source.call_started_at_utc);
+            if (operatorMonthlyCapacity(db, source.agent_id, recordTime).remaining === 0)
                 fail('quota_unavailable');
-            if (operatorChannelCapacity(db, source.agent_id, now.ms, 'call').remaining === 0)
+            if (operatorChannelCapacity(db, source.agent_id, recordTime, 'call').remaining === 0)
                 fail('quota_unavailable');
             if (enforceRosterQuota) {
                 try {

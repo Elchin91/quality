@@ -1,10 +1,10 @@
 import { nanoid } from 'nanoid';
-import { bakuMonth } from '../qaAutomation/types.js';
+import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { quotaFor } from '../qaAutomation/quota.js';
 import { assignAutomaticCallQaTask } from './automaticAssignment.js';
 import { CallQaServiceError } from './errors.js';
 import { appendCallQaOperationalEvent } from './operationalEvents.js';
-import { syncCallCatalog, } from './sync.js';
+import { syncCallCatalog } from './sync.js';
 const MAX_ASSIGNMENTS_PER_CYCLE = 32;
 const MAX_CANDIDATES_PER_CYCLE = 500;
 const MAX_PREPARATIONS_PER_CYCLE = 64;
@@ -17,15 +17,6 @@ function locator(value) {
     if (value.startsWith('omnichannel:'))
         return { kind: 'omnichannel_id', value };
     throw new CallQaServiceError('recording_not_ready', 409);
-}
-function bakuDay(now) {
-    return new Date(now.getTime() + 4 * 3_600_000).toISOString().slice(0, 10);
-}
-function bakuWindow(from, to) {
-    return {
-        start: new Date(`${from}T00:00:00+04:00`),
-        end: new Date(Date.parse(`${to}T00:00:00+04:00`) + 86_400_000),
-    };
 }
 function nowFrom(clock) {
     const now = clock?.() ?? new Date();
@@ -83,56 +74,24 @@ export async function prepareSelectedCallRecording(dependencies, input) {
         throw error;
     }
 }
-async function syncCurrentMonth(dependencies, signal) {
+async function syncPreviousDay(dependencies, signal) {
     if (!dependencies.source || !dependencies.normalizationProtection)
         throw new Error('call qa source unavailable');
     const now = nowFrom(dependencies.clock);
-    const month = bakuMonth(now.getTime());
-    const to = bakuDay(now);
+    const day = previousBakuDay(now);
     const correlationId = nanoid(24);
     try {
-        const result = {
-            pages: 0,
-            seen: 0,
-            inserted: 0,
-            updated: 0,
-            excluded: 0,
-            exclusionCounts: {},
-            duplicates: 0,
-            unmapped: 0,
-        };
-        // A month can exceed the per-operation row budget. At most 31 contiguous
-        // Baku days retain the existing 100-row pages and 5000-row bound per day.
-        // A dense day still fails closed; success requires every window to finish.
-        for (let day = 1; day <= Number(to.slice(8)); day += 1) {
-            if (signal.aborted)
-                throw new Error('call qa automation aborted');
-            const date = `${month}-${String(day).padStart(2, '0')}`;
-            const daily = await syncCallCatalog({
-                db: dependencies.db,
-                source: dependencies.source,
-                normalizationProtection: dependencies.normalizationProtection,
-                window: bakuWindow(date, date),
-                bakuDateFrom: date,
-                bakuDateTo: date,
-                pageSize: 100,
-                signal,
-                clock: () => now,
-            });
-            for (const key of [
-                'pages',
-                'seen',
-                'inserted',
-                'updated',
-                'excluded',
-                'duplicates',
-                'unmapped',
-            ])
-                result[key] += daily[key];
-            for (const reason of Object.keys(daily.exclusionCounts))
-                result.exclusionCounts[reason] =
-                    (result.exclusionCounts[reason] ?? 0) + (daily.exclusionCounts[reason] ?? 0);
-        }
+        const result = await syncCallCatalog({
+            db: dependencies.db,
+            source: dependencies.source,
+            normalizationProtection: dependencies.normalizationProtection,
+            window: { start: new Date(day.start), end: new Date(day.end) },
+            bakuDateFrom: day.date,
+            bakuDateTo: day.date,
+            pageSize: 100,
+            signal,
+            clock: () => now,
+        });
         appendCallQaOperationalEvent({
             db: dependencies.db,
             actorUserId: null,
@@ -160,7 +119,7 @@ async function syncCurrentMonth(dependencies, signal) {
     }
 }
 function candidateSourceIds(dependencies) {
-    const month = bakuMonth(nowFrom(dependencies.clock).getTime());
+    const day = previousBakuDay(nowFrom(dependencies.clock));
     // A cancelled source remains unique; its freed quota is filled from another recording.
     return dependencies.db
         .prepare(`SELECT records.id,records.agent_id
@@ -168,7 +127,7 @@ function candidateSourceIds(dependencies) {
        JOIN external_agent_mappings mappings
          ON mappings.source_system='m10' AND mappings.external_agent_id=records.external_agent_id
         AND mappings.agent_id=records.agent_id AND mappings.status='confirmed'
-       WHERE records.baku_date>=? AND records.baku_date<?
+       WHERE records.baku_date=?
          AND records.agent_id IS NOT NULL AND records.eligibility_status='eligible'
          AND records.eligibility_decision_version=1 AND records.recording_locator IS NOT NULL
          AND NOT EXISTS(SELECT 1 FROM call_qa_tasks tasks WHERE tasks.source_record_id=records.id)
@@ -178,7 +137,7 @@ function candidateSourceIds(dependencies) {
           WHERE tasks.agent_id=records.agent_id AND prior.baku_date=records.baku_date
             AND tasks.status<>'cancelled') ASC,
          RANDOM() LIMIT ?`)
-        .all(`${month}-01`, `${month}-32`, MAX_CANDIDATES_PER_CYCLE);
+        .all(day.date, MAX_CANDIDATES_PER_CYCLE);
 }
 /** Source I/O precedes the immediate transaction inside assignAutomaticCallQaTask. */
 export function createCallQaAutomation(dependencies) {
@@ -195,7 +154,7 @@ export function createCallQaAutomation(dependencies) {
             if (signal.aborted)
                 throw new Error('call qa automation aborted');
             if (syncCatalog)
-                await syncCurrentMonth(dependencies, signal);
+                await syncPreviousDay(dependencies, signal);
             if (!assignEnabled)
                 return;
             if (!dependencies.recordingClient || !dependencies.recordingStore)

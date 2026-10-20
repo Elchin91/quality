@@ -188,10 +188,12 @@ export function assignCallQaTask(input) {
             if (db.prepare('SELECT 1 FROM call_qa_tasks WHERE source_record_id = ?').get(source.id)) {
                 fail('duplicate_task');
             }
-            if (operatorMonthlyCapacity(db, source.agent_id, Date.parse(now)).remaining === 0) {
+            if (operatorMonthlyCapacity(db, source.agent_id, Date.parse(source.call_started_at_utc))
+                .remaining === 0) {
                 fail('quota_unavailable');
             }
-            if (operatorChannelCapacity(db, source.agent_id, Date.parse(now), 'call').remaining === 0) {
+            if (operatorChannelCapacity(db, source.agent_id, Date.parse(source.call_started_at_utc), 'call')
+                .remaining === 0) {
                 fail('quota_unavailable');
             }
             const taskId = idFrom(createId);

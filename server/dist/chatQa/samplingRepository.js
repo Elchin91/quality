@@ -32,12 +32,14 @@ export function samplingInput(db, now) {
     }));
     const bounds = bakuMonthBounds(now);
     const monthlyTaskCounts = db
-        .prepare(`SELECT agent_id AS agentId,
-      SUM(CASE WHEN status IN ('assigned','in_progress') THEN 1 ELSE 0 END) automaticOpenCount,
-      SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) automaticCompletedCount
-    FROM chat_qa_tasks WHERE assignment_origin='automatic' AND status<>'cancelled'
-      AND agent_id IS NOT NULL AND agent_id<>''
-      AND created_at>=? AND created_at<? GROUP BY agent_id`)
+        .prepare(`SELECT tasks.agent_id AS agentId,
+      SUM(CASE WHEN tasks.status IN ('assigned','in_progress') THEN 1 ELSE 0 END) automaticOpenCount,
+      SUM(CASE WHEN tasks.status='completed' THEN 1 ELSE 0 END) automaticCompletedCount
+    FROM chat_qa_tasks tasks LEFT JOIN source_interactions records ON records.id=tasks.interaction_id
+    WHERE tasks.assignment_origin='automatic' AND tasks.status<>'cancelled'
+      AND tasks.agent_id IS NOT NULL AND tasks.agent_id<>''
+      AND COALESCE(records.completed_at_utc,tasks.created_at)>=?
+      AND COALESCE(records.completed_at_utc,tasks.created_at)<? GROUP BY tasks.agent_id`)
         .all(bounds.start, bounds.end);
     const defaultCapacity = db.prepare('SELECT reviewer_open_cap FROM chat_sampling_policy WHERE id=1').get().reviewer_open_cap;
     const reviewers = listReviewerReadiness(db, defaultCapacity).map((reviewer) => ({

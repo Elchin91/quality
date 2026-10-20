@@ -3,6 +3,7 @@ import { recordAiReview } from '../aiEvaluation/persistence.js';
 import { calculateM10Score } from '../prompts/scorecard.js';
 import { operatorChannelCapacity, operatorMonthlyCapacity, quotaFor, } from '../qaAutomation/quota.js';
 import { enqueueQaRefill } from '../jobs/qaRefill.js';
+import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { CHAT_EVIDENCE_HASH_VERSION, normalizeConversation, } from './normalize.js';
 import { retainedTranscriptInterval } from './schema.js';
 import { persistedConversationEvidence } from './sourceEvidenceStore.js';
@@ -83,10 +84,17 @@ async function createTask(input) {
                 fail('reviewer_unavailable');
             const explanation = assignmentExplanation(input.assignmentOrigin, selectedReviewer);
             const agentId = resolveEvaluatedAgent(input.db, normalized, input.evaluatedAgentId);
-            if (operatorMonthlyCapacity(input.db, agentId, now).remaining === 0)
+            if (operatorMonthlyCapacity(input.db, agentId, interaction.completed_at_utc).remaining === 0)
                 fail('duplicate_task');
-            if (operatorChannelCapacity(input.db, agentId, now, 'chat').remaining === 0)
+            if (operatorChannelCapacity(input.db, agentId, interaction.completed_at_utc, 'chat')
+                .remaining === 0)
                 fail('duplicate_task');
+            if (input.assignmentOrigin === 'automatic' && input.enforceRosterQuota) {
+                const reviewDay = previousBakuDay(now);
+                if (interaction.completed_at_utc < reviewDay.start ||
+                    interaction.completed_at_utc >= reviewDay.end)
+                    fail('source_unavailable');
+            }
             if (input.assignmentOrigin === 'automatic' &&
                 input.enforceRosterQuota &&
                 !quotaFor(input.db, agentId, now, 'chat').allowed)

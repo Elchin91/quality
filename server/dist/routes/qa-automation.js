@@ -7,8 +7,7 @@ import { DurableJobRepository } from '../jobs/repository.js';
 import { refreshCurrentRoster } from '../qaAutomation/googleSheets.js';
 import { listRosterQuota, quotaFor } from '../qaAutomation/quota.js';
 import { confirmRosterLink, getAutomationEnabled, readRosterSnapshot, removeRosterLink, setAutomationEnabled, } from '../qaAutomation/repository.js';
-import { bakuMonth } from '../qaAutomation/types.js';
-import { bakuMonthBounds } from '../qaAutomation/types.js';
+import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { listReviewerReadiness } from '../reviewerAssignment/repository.js';
 import { SOURCE_DIAGNOSTICS } from '../chatQa/sourceDiagnostics.js';
 const linkBody = z.object({ agent_id: z.string().min(1).max(128) }).strict();
@@ -57,8 +56,8 @@ export function createQaAutomationRouter(db) {
     for (const base of ['/admin/chat-qa/automation', '/admin/call-qa/automation']) {
         router.get([`${base}/status`, `${base}/preview`], (_req, res) => {
             const now = Date.now();
-            const month = bakuMonth(now);
-            const bounds = bakuMonthBounds(month);
+            const bounds = previousBakuDay(now);
+            const month = bounds.date.slice(0, 7);
             const snapshot = readRosterSnapshot(db, month);
             const setting = db
                 .prepare('SELECT enabled,updated_at_ms FROM qa_automation_settings WHERE id=1')
@@ -82,10 +81,10 @@ export function createQaAutomationRouter(db) {
                     ? db
                         .prepare(`SELECT COUNT(*) count FROM call_source_records source
                    WHERE source.agent_id=? AND source.eligibility_status='eligible'
-                     AND source.baku_date>=? AND source.baku_date<?
+                     AND source.baku_date=?
                      AND NOT EXISTS(SELECT 1 FROM call_qa_tasks task
                        WHERE task.source_record_id=source.id)`)
-                        .get(item.agentId, `${month}-01`, `${month}-32`).count
+                        .get(item.agentId, bounds.date).count
                     : 0;
                 const channelQuota = item.agentId ? quotaFor(db, item.agentId, now, channel) : item;
                 const shortfallReason = item.reason !== 'ready'
@@ -194,7 +193,7 @@ export function createQaAutomationRouter(db) {
                 return res.status(400).json({ error: 'invalid_input' });
             try {
                 confirmRosterLink(db, {
-                    month: bakuMonth(Date.now()),
+                    month: previousBakuDay(Date.now()).date.slice(0, 7),
                     personKey: key.data,
                     agentId: body.data.agent_id,
                     adminUserId: req.user.id,

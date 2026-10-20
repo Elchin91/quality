@@ -22,6 +22,8 @@ const pageSchema = z.object({
     empty: z.boolean(),
 });
 export class HttpChatSourceClient {
+    maxSyncWindowMs = 30 * 60_000;
+    maxSyncDurationMs = 4 * 60_000;
     transport;
     tabId = randomUUID();
     constructor(config, deps = {}) {
