@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { asyncHandler } from '../asyncHandler.js';
 import { requireRole } from '../auth.js';
 import { DurableJobRepository } from '../jobs/repository.js';
-import { refreshCurrentRoster } from '../qaAutomation/googleSheets.js';
+import { refreshCurrentRoster, rosterErrorCode } from '../qaAutomation/googleSheets.js';
 import { listRosterQuota, quotaFor } from '../qaAutomation/quota.js';
 import { confirmRosterLink, getAutomationEnabled, readRosterSnapshot, removeRosterLink, setAutomationEnabled, } from '../qaAutomation/repository.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
@@ -144,8 +144,8 @@ export function createQaAutomationRouter(db) {
                 const snapshot = await refreshCurrentRoster(db);
                 res.json({ month: snapshot.month, fetched_at_ms: snapshot.fetchedAtMs });
             }
-            catch {
-                res.status(503).json({ error: 'roster_unavailable' });
+            catch (error) {
+                res.status(503).json({ error: rosterErrorCode(error) });
             }
         }));
         router.post(`${base}/run`, (req, res) => {

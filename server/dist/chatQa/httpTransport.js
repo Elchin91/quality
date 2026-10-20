@@ -1,6 +1,6 @@
 import { SourceDiagnosticError } from './sourceDiagnostics.js';
 const ORIGIN = 'https://calls.pashapay.az';
-/** Only login, search, and exact evidence reads are permitted. Never follow redirects. */
+/** Only login, search, directory and exact evidence reads are permitted. Never follow redirects. */
 export class CallsChatHttpTransport {
     config;
     abort = new AbortController();
@@ -139,7 +139,8 @@ export class CallsChatHttpTransport {
         // Literal route and parameter validation prevents a caller from adding source writes.
         const allowed = method === 'POST'
             ? path === '/api/profile/request/searchRequest'
-            : /^\/api\/profile\/request\/requestById\?requestId=[0-9a-f-]{36}$/.test(path) ||
+            : path === '/api/users/all' ||
+                /^\/api\/profile\/request\/requestById\?requestId=[0-9a-f-]{36}$/.test(path) ||
                 /^\/api\/omnichannel\/conversation\/[1-9]\d*\?activeTabId=[0-9a-f-]{36}$/.test(path);
         if (!allowed || (method === 'GET' && body !== undefined))
             throw new SourceDiagnosticError('source_schema_invalid');
