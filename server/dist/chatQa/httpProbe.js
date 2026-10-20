@@ -163,8 +163,10 @@ export async function runHttpProbe(input) {
     }
     let callParity = { skipped: 'mysql_not_configured' };
     if (input.readMysqlCalls) {
+        const mysqlStarted = performance.now();
         try {
             const mysql = await input.readMysqlCalls(window);
+            const mysqlMs = elapsed(mysqlStarted);
             const http = new Map(calls.map((row) => [row.id.toLowerCase(), row]));
             let agentMismatch = 0;
             let durationMismatch = 0;
@@ -182,8 +184,10 @@ export async function runHttpProbe(input) {
                     durationMismatch++;
             }
             callParity = {
+                mysqlMs,
                 mysqlCalls: mysql.length,
                 httpCalls: calls.length,
+                httpInboundM10: calls.filter((row) => row.type === 'in' && row.queueName === 'm10').length,
                 matched,
                 onlyMysql: mysql.length - matched,
                 agentMismatch,
@@ -192,7 +196,13 @@ export async function runHttpProbe(input) {
             };
         }
         catch (error) {
-            callParity = { failed: sourceDiagnosticFromError(error) };
+            const code = error?.code;
+            callParity = {
+                failed: sourceDiagnosticFromError(error),
+                // Driver codes are fixed identifiers such as ETIMEDOUT or ER_ACCESS_DENIED_ERROR.
+                driverCode: typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(code) ? code : null,
+                mysqlMs: elapsed(mysqlStarted),
+            };
         }
     }
     const avg = (values) => values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : null;

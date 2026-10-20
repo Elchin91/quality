@@ -20,6 +20,9 @@ services:
       # HTTP chats are opt-in; calls retain their existing MySQL source.
       CHAT_SOURCE_BACKEND: "${CHAT_SOURCE_BACKEND:-mysql}"
       CALL_SOURCE_BACKEND: "${CALL_SOURCE_BACKEND:-mysql}"
+      # Calls search takes ~6 s per request regardless of size; 500 rows/page needs ~13 per day.
+      CHAT_HTTP_PAGE_SIZE: "${CHAT_HTTP_PAGE_SIZE:-500}"
+      CHAT_HTTP_CONCURRENCY: "${CHAT_HTTP_CONCURRENCY:-4}"
       CHAT_SOURCE_CORPORATE_PROFILE: "true"
       CHAT_SOURCE_MYSQL_TLS: "${CHAT_SOURCE_MYSQL_TLS:-false}"
       CHAT_SOURCE_VPN_PROFILE: "false"

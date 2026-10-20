@@ -1,53 +1,59 @@
+import mysql from 'mysql2/promise';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadRecordingConfig } from '../callQa/recordingConfig.js';
-import { createMysqlCallSourceAdapter } from '../callQa/mysqlSource.js';
-import { CALL_SOURCE_PROJECTION } from '../callQa/sourceClient.js';
-import { CALL_SOURCE_MAX_PAGE_SIZE, callSourceConfigFromChatSource, } from '../callQa/sourceConfig.js';
 import { runHttpProbe } from './httpProbe.js';
 import { CallsChatHttpTransport } from './httpTransport.js';
 import { loadChatSourceConfig } from './sourceConfig.js';
 import { sourceDiagnosticFromError } from './sourceDiagnostics.js';
-/** Reads the same inbound m10 calls the current MySQL call catalog would import. */
-function mysqlCallReader(env, signal) {
-    let adapter;
+const MYSQL_PROBE_TIMEOUT_MS = 60_000;
+/**
+ * One plain read of the inbound m10 calls the MySQL call catalog starts from. Unlike the catalog
+ * adapter it has a 60 s budget and keeps the driver error code, so slow or blocked reads show up.
+ */
+function mysqlCallReader(env) {
+    let chat;
     try {
-        const chat = loadChatSourceConfig({
+        chat = loadChatSourceConfig({
             ...env,
             CHAT_SOURCE_BACKEND: env.CALL_SOURCE_BACKEND || 'mysql',
         });
-        if (!chat || chat.backend === 'http')
-            return undefined;
-        adapter = createMysqlCallSourceAdapter(callSourceConfigFromChatSource(chat));
     }
     catch {
         return undefined;
     }
+    if (!chat || chat.backend === 'http' || !chat.mysqlHost)
+        return undefined;
+    const config = chat;
     return async (window) => {
-        const records = [];
-        let cursor = null;
-        do {
-            const page = await adapter.readPage({
-                startInclusiveUtc: window.start.toISOString(),
-                endExclusiveUtc: window.end.toISOString(),
-                cursor,
-                limit: CALL_SOURCE_MAX_PAGE_SIZE,
-                projection: CALL_SOURCE_PROJECTION,
-                signal,
-            });
-            for (const raw of page.records) {
-                const record = raw;
-                if (!record || typeof record.sourceRef !== 'string')
-                    continue;
-                records.push({
-                    requestId: record.sourceRef.replace(/^calls-request:/u, '').toLowerCase(),
-                    agentId: String(record.externalAgentId),
-                    durationSeconds: typeof record.sourceDurationSeconds === 'number' ? record.sourceDurationSeconds : null,
-                });
-            }
-            cursor = page.nextCursor;
-        } while (cursor);
-        return records;
+        const connection = await mysql.createConnection({
+            host: config.mysqlHost,
+            port: config.mysqlPort,
+            user: config.mysqlUser,
+            password: config.mysqlPassword,
+            database: config.mysqlDatabase,
+            connectTimeout: 10_000,
+            ssl: config.mysqlTls ? { rejectUnauthorized: true } : undefined,
+            timezone: '+04:00',
+        });
+        try {
+            const [rows] = await connection.execute({
+                sql: `SELECT c.request_id AS requestId, c.user_id AS userId, c.talk_duration AS talkDuration
+            FROM report.call_report c
+            WHERE c.type = 'in' AND c.queue_name = 'm10'
+              AND c.answer_date >= ? AND c.answer_date < ?
+              AND c.end_date IS NOT NULL AND c.request_id IS NOT NULL AND c.user_id IS NOT NULL`,
+                timeout: MYSQL_PROBE_TIMEOUT_MS,
+            }, [window.start, window.end]);
+            return rows.map((row) => ({
+                requestId: String(row.requestId).toLowerCase(),
+                agentId: String(row.userId),
+                durationSeconds: row.talkDuration === null ? null : Number(row.talkDuration),
+            }));
+        }
+        finally {
+            connection.destroy();
+        }
     };
 }
 export async function runHttpProbeCli(env = process.env) {
@@ -60,7 +66,7 @@ export async function runHttpProbeCli(env = process.env) {
     }
     const signal = AbortSignal.timeout(5 * 60_000);
     try {
-        return await runHttpProbe({ transport, signal, readMysqlCalls: mysqlCallReader(env, signal) });
+        return await runHttpProbe({ transport, signal, readMysqlCalls: mysqlCallReader(env) });
     }
     catch (error) {
         return { ok: false, errorCode: sourceDiagnosticFromError(error) };
