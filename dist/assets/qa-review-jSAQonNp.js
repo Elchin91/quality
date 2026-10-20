@@ -1,0 +1,1 @@
+import{p as e}from"./index-C7UpW2Cl.js";function t(t){return e.every(e=>{let n=t[e];return e===`risk_management`&&n===null||typeof n==`number`&&Number.isFinite(n)&&n>=0&&n<=4})}export{t};

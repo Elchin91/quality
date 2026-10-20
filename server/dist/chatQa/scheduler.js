@@ -2,6 +2,7 @@ import { purgeExpiredAiPayloads } from '../aiEvaluation/runPayloads.js';
 import { nanoid } from 'nanoid';
 import { sampleAutomaticTasks } from './assignment.js';
 import { samplingInput } from './samplingRepository.js';
+import { verifyPendingForReviewDay } from './pendingVerification.js';
 import { createAutomaticTask } from './service.js';
 import { purgeExpiredAppEvents, writeAppEventIfReady } from '../realtime/appEvents.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
@@ -218,6 +219,7 @@ export async function runChatQaCycle(input) {
                     ]))
                     : undefined;
                 const reviewDay = previousBakuDay(now);
+                await verifyPendingForReviewDay(input, reviewDay, now, rosterRemaining);
                 const sampled = samplingInput(input.db, new Date(reviewDay.start));
                 const proposals = sampleAutomaticTasks({
                     ...sampled,

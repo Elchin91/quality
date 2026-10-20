@@ -1,8 +1,9 @@
 import { hasLegacyRequestOwner } from './httpLegacyOwnership.js';
 import { nanoid } from 'nanoid';
 import { buildChatCatalog, uniqueSorted } from './catalog.js';
+import { isDuplicate, planConversation } from './syncPlanning.js';
 import { CHAT_SYNC_LEASE_MS } from './schema.js';
-import { eligibleAgentMappings, fail } from './serviceSupport.js';
+import { fail } from './serviceSupport.js';
 import { autoConfirmSuggestedMappings, backfillConfirmedInteractionMappings, countExistingCatalogMappings, suggestCatalogMappings, } from './syncMappings.js';
 import { assertSyncLease, finalizeSyncResult, runResult, finishSyncLease, startSyncLeaseHeartbeat, syncClockMs, SyncLeaseLostError, } from './syncLease.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
@@ -19,44 +20,6 @@ function latestSuccessfulWatermark(db, now, scope) {
        ORDER BY window_to DESC LIMIT 1`)
         .get(now.getTime(), scope);
     return row?.window_to ?? null;
-}
-function confirmedAgentId(db, externalAgentIds) {
-    if (externalAgentIds.length !== 1)
-        return null;
-    const row = eligibleAgentMappings(db, externalAgentIds)[0];
-    return row?.agent_id ?? null;
-}
-function isDuplicate(db, conversationId) {
-    return Boolean(db
-        .prepare(`SELECT 1 FROM chat_qa_tasks tasks
-         JOIN source_interactions interactions ON interactions.id=tasks.interaction_id
-         WHERE interactions.source_system=? AND interactions.conversation_id=?
-           AND tasks.status<>'cancelled' LIMIT 1`)
-        .get(SOURCE_SYSTEM, conversationId));
-}
-function planConversation(db, conversation, minClientMessages, minAgentMessages) {
-    const mappedAgentId = confirmedAgentId(db, conversation.externalAgentIds);
-    const reasons = [...conversation.sourceReasons];
-    if (conversation.clientMessageCount < minClientMessages ||
-        conversation.agentMessageCount < minAgentMessages) {
-        reasons.push('below_message_threshold');
-    }
-    if (conversation.distinctAgentCount > 1 || conversation.externalAgentIds.length > 1) {
-        reasons.push('multi_agent');
-    }
-    if (conversation.distinctAgentCount !== 1 ||
-        conversation.externalAgentIds.length !== 1 ||
-        mappedAgentId === null) {
-        reasons.push('unmapped_agent');
-    }
-    if (isDuplicate(db, conversation.conversationId) || hasLegacyRequestOwner(db, conversation))
-        reasons.push('duplicate');
-    return {
-        ...conversation,
-        mappedAgentId,
-        eligibilityState: reasons.length === 0 ? 'eligible' : 'excluded',
-        exclusionReasons: reasons,
-    };
 }
 function bakuDate(date) {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -85,8 +48,9 @@ function persistConversation(db, conversation, runId, now) {
     db.prepare(`INSERT INTO source_interactions
      (id,source_system,conversation_id,completed_at_utc,baku_date,channels_json,queues_json,
       classifiers_json,external_agent_ids_json,agent_id,client_message_count,agent_message_count,
-      eligibility_state,exclusion_reasons_json,first_seen_at,last_seen_at,last_sync_run_id)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      eligibility_state,exclusion_reasons_json,first_seen_at,last_seen_at,last_sync_run_id,
+      message_counts_verified_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(source_system,conversation_id) DO UPDATE SET
        completed_at_utc=excluded.completed_at_utc,
        baku_date=excluded.baku_date,
@@ -100,7 +64,8 @@ function persistConversation(db, conversation, runId, now) {
        eligibility_state=excluded.eligibility_state,
        exclusion_reasons_json=excluded.exclusion_reasons_json,
        last_seen_at=excluded.last_seen_at,
-       last_sync_run_id=excluded.last_sync_run_id`).run(interactionId, SOURCE_SYSTEM, conversation.conversationId, conversation.completedAt.getTime(), bakuDate(conversation.completedAt), JSON.stringify(conversation.channels), JSON.stringify(conversation.queues), JSON.stringify(conversation.classifiers), JSON.stringify(conversation.externalAgentIds), conversation.mappedAgentId, conversation.clientMessageCount, conversation.agentMessageCount, conversation.eligibilityState, JSON.stringify(conversation.exclusionReasons), now, now, runId);
+       last_sync_run_id=excluded.last_sync_run_id,
+       message_counts_verified_at=excluded.message_counts_verified_at`).run(interactionId, SOURCE_SYSTEM, conversation.conversationId, conversation.completedAt.getTime(), bakuDate(conversation.completedAt), JSON.stringify(conversation.channels), JSON.stringify(conversation.queues), JSON.stringify(conversation.classifiers), JSON.stringify(conversation.externalAgentIds), conversation.mappedAgentId, conversation.clientMessageCount ?? 0, conversation.agentMessageCount ?? 0, conversation.eligibilityState, JSON.stringify(conversation.exclusionReasons), now, now, runId, conversation.countsVerifiedAt);
     const upsertRequest = db.prepare(`INSERT INTO source_interaction_requests
      (id,interaction_id,request_uuid,status,queue,channel,completed_at_source,first_seen_at,last_seen_at)
      VALUES (?,?,?,?,?,?,?,?,?)
@@ -203,7 +168,7 @@ export async function syncChatCatalog(input) {
                 const message = SOURCE_DIAGNOSTICS[code];
                 return finalizeSyncResult(input.db, runResult(runId, mode, 'failed', window, empty, code, message, health.errorDetails), syncClockMs(input.clock), leaseGeneration);
             }
-            rows = await input.source.listCompletedConversations(window, input.signal);
+            rows = await input.source.listCompletedConversations(window, input.signal, input.onCatalogProgress);
             input.signal?.throwIfAborted();
             input.assertOwnership?.();
         }
@@ -238,16 +203,17 @@ export async function syncChatCatalog(input) {
             }
             minClientMessages = policy.min_client_messages;
             minAgentMessages = policy.min_agent_messages;
-            planned = catalog.map((conversation) => planConversation(input.db, conversation, minClientMessages, minAgentMessages));
+            planned = catalog.map((conversation) => planConversation(input.db, conversation, minClientMessages, minAgentMessages, nowMs));
             mutableCatalog = catalog.filter((row) => !isDuplicate(input.db, row.conversationId) && !hasLegacyRequestOwner(input.db, row));
             const externalIds = uniqueSorted(mutableCatalog.flatMap((row) => row.externalAgentIds));
             const existingMappings = countExistingCatalogMappings(input.db, externalIds);
             const eligibleCount = planned.filter((row) => row.eligibilityState === 'eligible').length;
+            const excludedCount = planned.filter((row) => row.eligibilityState === 'excluded').length;
             counters = {
                 requestsSeen: rows.length,
                 conversationsSeen: catalog.length,
                 eligibleCount,
-                excludedCount: planned.length - eligibleCount,
+                excludedCount,
                 proposedMappingCount: externalIds.length - existingMappings,
                 proposedTaskCount: eligibleCount,
             };
@@ -270,12 +236,12 @@ export async function syncChatCatalog(input) {
             if (input.mappingConfirmationActorUserId) {
                 autoConfirmSuggestedMappings(input.db, input.mappingConfirmationActorUserId, nowMs);
                 backfillConfirmedInteractionMappings(input.db);
-                planned = catalog.map((conversation) => planConversation(input.db, conversation, minClientMessages, minAgentMessages));
+                planned = catalog.map((conversation) => planConversation(input.db, conversation, minClientMessages, minAgentMessages, nowMs));
                 const eligibleCount = planned.filter((row) => row.eligibilityState === 'eligible').length;
                 counters = {
                     ...counters,
                     eligibleCount,
-                    excludedCount: planned.length - eligibleCount,
+                    excludedCount: planned.filter((row) => row.eligibilityState === 'excluded').length,
                     proposedTaskCount: eligibleCount,
                 };
             }

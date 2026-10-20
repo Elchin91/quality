@@ -1,10 +1,21 @@
+import { Semaphore } from './boundedPool.js';
 import { SourceDiagnosticError } from './sourceDiagnostics.js';
 const ORIGIN = 'https://calls.pashapay.az';
+const RETRY_STATUSES = new Set([429, 502, 503, 504]);
+const DEFAULT_RETRY_DELAYS_MS = [500, 1_500];
+const MAX_RETRY_AFTER_MS = 5_000;
+function retryAfterMs(value) {
+    if (!value || !/^\d{1,4}$/.test(value.trim()))
+        return null;
+    return Math.min(Number(value.trim()) * 1000, MAX_RETRY_AFTER_MS);
+}
 /** Only login, search, directory and exact evidence reads are permitted. Never follow redirects. */
 export class CallsChatHttpTransport {
     config;
     abort = new AbortController();
     fetcher;
+    slots;
+    retryDelaysMs;
     token = null;
     loginPromise = null;
     constructor(config, deps = {}) {
@@ -13,6 +24,8 @@ export class CallsChatHttpTransport {
         if (u.origin !== ORIGIN || u.pathname !== '/' || u.search || u.hash || u.username || u.password)
             throw new SourceDiagnosticError('source_connection_failed');
         this.fetcher = deps.fetch ?? globalThis.fetch;
+        this.slots = new Semaphore(deps.concurrency ?? 4);
+        this.retryDelaysMs = deps.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
     }
     async json(method, path, body, token, operation) {
         const deadline = AbortSignal.timeout(this.config.timeoutMs);
@@ -37,7 +50,11 @@ export class CallsChatHttpTransport {
             });
             if (!response.ok) {
                 await response.body?.cancel();
-                return { status: response.status, data: null };
+                return {
+                    status: response.status,
+                    data: null,
+                    retryAfterMs: retryAfterMs(response.headers.get('retry-after')),
+                };
             }
             if (!response.headers.get('content-type')?.toLowerCase().startsWith('application/json') ||
                 !response.body) {
@@ -149,18 +166,58 @@ export class CallsChatHttpTransport {
         signal?.throwIfAborted();
         let token = await this.authenticate();
         signal?.throwIfAborted();
-        let response = await this.json(method, path, body, token, signal);
+        let response = await this.withRetry(() => this.json(method, path, body, token, signal), signal);
         if (response.status === 401) {
             if (this.token?.value === token)
                 this.token = null;
             signal?.throwIfAborted();
             token = await this.authenticate();
             signal?.throwIfAborted();
-            response = await this.json(method, path, body, token, signal);
+            response = await this.withRetry(() => this.json(method, path, body, token, signal), signal);
         }
         if (response.status !== 200)
             throw new SourceDiagnosticError('source_connection_failed');
         return response.data;
+    }
+    /** Bounded upstream fan-out; transient gateway, rate and network failures retry twice. */
+    async withRetry(attempt, signal) {
+        for (let retry = 0;; retry++) {
+            let wait = null;
+            try {
+                const response = await this.slots.run(attempt);
+                if (!RETRY_STATUSES.has(response.status) || retry >= this.retryDelaysMs.length)
+                    return response;
+                wait = response.retryAfterMs ?? this.retryDelaysMs[retry];
+            }
+            catch (error) {
+                const transient = error instanceof SourceDiagnosticError &&
+                    (error.code === 'source_query_timeout' || error.code === 'source_connection_failed');
+                if (!transient ||
+                    retry >= this.retryDelaysMs.length ||
+                    this.abort.signal.aborted ||
+                    signal?.aborted)
+                    throw error;
+                wait = this.retryDelaysMs[retry];
+            }
+            await this.pause(wait, signal);
+        }
+    }
+    pause(ms, signal) {
+        const stop = AbortSignal.any([this.abort.signal, ...(signal ? [signal] : [])]);
+        return new Promise((resolve, reject) => {
+            const fail = () => {
+                clearTimeout(timer);
+                reject(new SourceDiagnosticError('source_connection_failed'));
+            };
+            const timer = setTimeout(() => {
+                stop.removeEventListener('abort', fail);
+                resolve();
+            }, ms);
+            if (stop.aborted)
+                fail();
+            else
+                stop.addEventListener('abort', fail, { once: true });
+        });
     }
     close() {
         this.abort.abort();

@@ -5,7 +5,9 @@ import { syncChatCatalog } from './sync.js';
 import { SourceDiagnosticError, sourceDiagnosticFromError, sourceFailureDetailsFromError, } from './sourceDiagnostics.js';
 import { sourceFailureDetailsDto, sourceFailureDetailsJson } from './sourceFailureDetails.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { writeAppEventIfReady } from '../realtime/appEvents.js';
 const MIN_CHUNK_MS = 60_000;
+const PROGRESS_INTERVAL_MS = 2_000;
 function read(db, id) {
     return id
         ? db.prepare('SELECT * FROM chat_source_sync_operations WHERE id=?').get(id)
@@ -31,6 +33,30 @@ function dto(row) {
 export function getManualChatSync(db, id) {
     const row = read(db, id);
     return row ? dto(effectiveOperation(db, row)) : null;
+}
+/** Persists catalog paging at most every two seconds and nudges admin live views. */
+function progressWriter(db, id, clock) {
+    let last = 0;
+    return ({ pagesDone, pagesTotal }) => {
+        const now = clock().getTime();
+        if (pagesDone < pagesTotal && now - last < PROGRESS_INTERVAL_MS)
+            return;
+        last = now;
+        try {
+            db.prepare("UPDATE chat_source_sync_operations SET pages_done=?,pages_total=?,updated_at=? WHERE id=? AND status IN ('queued','running')").run(pagesDone, pagesTotal, now, id);
+            writeAppEventIfReady(db, {
+                type: 'source.status',
+                entityType: 'chat_source',
+                entityId: id,
+                revision: now,
+                audienceRole: 'admin',
+                now,
+            });
+        }
+        catch {
+            // Progress is advisory; a busy database must not fail the catalog read.
+        }
+    };
 }
 function enqueueChunk(db, row, now) {
     const job = new DurableJobRepository(db).enqueue({
@@ -138,6 +164,7 @@ export async function runManualChatSync(input) {
             operationId: operation.id,
             assertOwnership: input.assertOwnership,
             window: { start: new Date(operation.cursor_at), end: new Date(end) },
+            onCatalogProgress: progressWriter(db, operation.id, clock),
             mappingConfirmationActorUserId: operation.requested_by === 'system:daily' ? undefined : operation.requested_by,
         }, input.sync ?? syncChatCatalog, source.maxSyncDurationMs);
         signal.throwIfAborted();

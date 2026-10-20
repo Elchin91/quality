@@ -3,6 +3,7 @@ import { nextBakuNine, purgeExpiredEvidence, runChatQaCycle, runSlaJobs, } from 
 import { DurableJobRepository } from './repository.js';
 import { DurableJobWorker } from './worker.js';
 import { runManualChatSync } from '../chatQa/manualSync.js';
+import { purgeStaleCatalog } from '../chatQa/retention.js';
 function bakuDay(now) {
     return new Date(now.getTime() + 4 * 3_600_000).toISOString().slice(0, 10);
 }
@@ -15,7 +16,10 @@ export function createMaintenanceHandlers(input) {
         },
         chat_retention_purge: () => {
             purgeExpiredEvidence({ db: input.db, clock });
+            purgeStaleCatalog(input.db, clock().getTime());
             purgeExpiredAppEvents(input.db, clock().getTime());
+            // Refreshes planner statistics only for tables whose shape changed since the last run.
+            input.db.pragma('optimize');
         },
         chat_scheduled_cycle: async (payload, signal, context) => {
             if (signal.aborted)

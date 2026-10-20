@@ -51,8 +51,9 @@ function interactionDto(db, row) {
         classifiers: safeClassifiers(row.classifiers_json ?? null),
         agent_id: row.agent_id,
         agent_name: row.agent_name,
-        client_message_count: row.client_message_count,
-        agent_message_count: row.agent_message_count,
+        // Pending HTTP chats have no verified message counts yet; never present them as zero.
+        client_message_count: row.eligibility_state === 'pending' ? null : row.client_message_count,
+        agent_message_count: row.eligibility_state === 'pending' ? null : row.agent_message_count,
         attachment_count: row.attachment_count,
         eligibility_state: row.eligibility_state,
         exclusion_reasons: jsonList(String(row.exclusion_reasons_json)),
@@ -101,7 +102,13 @@ export function listInteractions(db, input) {
         candidate.created_at DESC,candidate.id DESC LIMIT 1)
     LEFT JOIN users reviewer ON reviewer.id=qt.reviewer_user_id
     WHERE ${filters.join(' AND ')}`;
-    const total = db.prepare(`SELECT COUNT(DISTINCT si.id) count ${from}`).get(...args).count;
+    // Every join is at most one row per interaction; without task filters the count needs no join.
+    const taskFiltered = Boolean(input.reviewer_user_id?.length || input.task_status?.length);
+    const total = db
+        .prepare(taskFiltered
+        ? `SELECT COUNT(DISTINCT si.id) count ${from}`
+        : `SELECT COUNT(*) count FROM source_interactions si WHERE ${filters.join(' AND ')}`)
+        .get(...args).count;
     const offset = (input.page - 1) * input.page_size;
     const rows = db
         .prepare(`SELECT si.id,si.completed_at_utc,si.baku_date,si.channels_json,si.queues_json,

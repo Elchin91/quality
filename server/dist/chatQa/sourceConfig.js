@@ -1,7 +1,22 @@
 import { loadRecordingConfig } from '../callQa/recordingConfig.js';
+export const HTTP_CATALOG_PAGE_SIZES = [50, 100, 200, 500];
+export const HTTP_CATALOG_MAX_CONCURRENCY = 8;
+export function loadHttpCatalogOptions(env) {
+    const pageSize = Number(env.CHAT_HTTP_PAGE_SIZE?.trim() || 50);
+    const concurrency = Number(env.CHAT_HTTP_CONCURRENCY?.trim() || 4);
+    if (!HTTP_CATALOG_PAGE_SIZES.includes(pageSize))
+        throw new Error('invalid configuration: CHAT_HTTP_PAGE_SIZE');
+    if (!Number.isInteger(concurrency) ||
+        concurrency < 1 ||
+        concurrency > HTTP_CATALOG_MAX_CONCURRENCY)
+        throw new Error('invalid configuration: CHAT_HTTP_CONCURRENCY');
+    return { pageSize, concurrency };
+}
 export function allowsCorporateMysql(config) {
-    return config.corporateNetwork === true && config.backend === 'mysql' &&
-        config.mysqlHost === '192.168.46.4' && !config.laptopVpn;
+    return (config.corporateNetwork === true &&
+        config.backend === 'mysql' &&
+        config.mysqlHost === '192.168.46.4' &&
+        !config.laptopVpn);
 }
 const REQUIRED_KEYS = [
     'CHAT_SOURCE_MONGO_URI',
@@ -96,10 +111,26 @@ export function loadChatSourceConfig(env) {
         return null;
     const backend = env.CHAT_SOURCE_BACKEND?.trim() || 'mongo_mysql';
     if (backend === 'http') {
-        return { enabled: true, backend, http: { ...loadRecordingConfig(env), timeoutMs: parseQueryTimeout(env.CHAT_SOURCE_QUERY_TIMEOUT_MS), maxBytes: 4_000_000 },
-            mongoUri: '', mongoDatabase: '', mysqlHost: '', mysqlPort: 3306, mysqlUser: '', mysqlPassword: '', mysqlDatabase: '', mysqlTls: true,
+        return {
+            enabled: true,
+            backend,
+            http: {
+                ...loadRecordingConfig(env),
+                timeoutMs: parseQueryTimeout(env.CHAT_SOURCE_QUERY_TIMEOUT_MS),
+                maxBytes: 4_000_000,
+            },
+            httpCatalog: loadHttpCatalogOptions(env),
+            mongoUri: '',
+            mongoDatabase: '',
+            mysqlHost: '',
+            mysqlPort: 3306,
+            mysqlUser: '',
+            mysqlPassword: '',
+            mysqlDatabase: '',
+            mysqlTls: true,
             queryTimeoutMs: parseQueryTimeout(env.CHAT_SOURCE_QUERY_TIMEOUT_MS),
-            samplingHmacSecret: parseBase64(required(env, 'CHAT_SAMPLING_HMAC_SECRET')) };
+            samplingHmacSecret: parseBase64(required(env, 'CHAT_SAMPLING_HMAC_SECRET')),
+        };
     }
     if (backend !== 'mysql' && backend !== 'mongo_mysql')
         throw new Error('invalid configuration: CHAT_SOURCE_BACKEND');
@@ -119,7 +150,12 @@ export function loadChatSourceConfig(env) {
     const mysqlTls = parseBoolean(required(env, 'CHAT_SOURCE_MYSQL_TLS'), 'CHAT_SOURCE_MYSQL_TLS', true);
     const mysqlHost = required(env, 'CHAT_SOURCE_MYSQL_HOST');
     const corporateNetwork = parseBoolean(env.CHAT_SOURCE_CORPORATE_PROFILE, 'CHAT_SOURCE_CORPORATE_PROFILE', false);
-    const corporateAllowed = allowsCorporateMysql({ backend, mysqlHost, corporateNetwork, laptopVpn });
+    const corporateAllowed = allowsCorporateMysql({
+        backend,
+        mysqlHost,
+        corporateNetwork,
+        laptopVpn,
+    });
     if (corporateNetwork && !corporateAllowed)
         throw new Error('invalid configuration: CHAT_SOURCE_CORPORATE_PROFILE');
     if (production && !laptopVpn && !corporateAllowed && !mysqlTls)

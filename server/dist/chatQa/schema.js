@@ -269,6 +269,10 @@ export function createChatQaSchema(db, clock = () => new Date()) {
       ON chat_sync_runs(status,completed_at);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_qa_task_live_interaction
       ON chat_qa_tasks(interaction_id) WHERE status <> 'cancelled';
+    CREATE INDEX IF NOT EXISTS idx_chat_qa_tasks_interaction_created
+      ON chat_qa_tasks(interaction_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_source_interactions_completed
+      ON source_interactions(completed_at_utc DESC, id DESC);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_qa_task_evaluation
       ON chat_qa_tasks(evaluation_id) WHERE evaluation_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_chat_qa_events_task
@@ -344,6 +348,10 @@ export function createChatQaSchema(db, clock = () => new Date()) {
     const interactionColumns = db.prepare('PRAGMA table_info(source_interactions)').all();
     if (!interactionColumns.some(({ name }) => name === 'content_hash_version')) {
         db.exec('ALTER TABLE source_interactions ADD COLUMN content_hash_version INTEGER NOT NULL DEFAULT 1 CHECK(content_hash_version IN (1,2))');
+    }
+    // HTTP catalogs store search metadata first; message counts are verified only for sampled chats.
+    if (!interactionColumns.some(({ name }) => name === 'message_counts_verified_at')) {
+        db.exec('ALTER TABLE source_interactions ADD COLUMN message_counts_verified_at INTEGER');
     }
     db.prepare('INSERT OR IGNORE INTO chat_sampling_policy (id, updated_at) VALUES (1, ?)').run(now);
 }

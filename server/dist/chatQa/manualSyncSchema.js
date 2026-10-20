@@ -27,4 +27,9 @@ export function createManualChatSyncSchema(db) {
     if (!columns.some((column) => column.name === 'error_details_json')) {
         db.exec('ALTER TABLE chat_source_sync_operations ADD COLUMN error_details_json TEXT');
     }
+    for (const column of ['pages_done', 'pages_total']) {
+        if (!columns.some(({ name }) => name === column)) {
+            db.exec(`ALTER TABLE chat_source_sync_operations ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 0 CHECK(${column} >= 0)`);
+        }
+    }
 }

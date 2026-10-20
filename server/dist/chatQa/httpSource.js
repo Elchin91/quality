@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { logger } from '../logger.js';
 import { CallsChatHttpTransport } from './httpTransport.js';
-import { candidate, isIsolatedHttpRequest, httpDate, httpTimestamp, identity, parse, parseMessages, parseRequest, searchRowSchema, sessionKey, } from './httpContract.js';
+import { candidate, isIsolatedHttpRequest, isIsolatedSearchRow, httpDate, httpTimestamp, identity, parse, parseMessages, parseRequest, searchCandidate, searchCatalogRowSchema, searchRowSchema, sessionKey, } from './httpContract.js';
 import { SourceDiagnosticError, sourceDiagnosticFromError, sourceFailureAtStage, } from './sourceDiagnostics.js';
 import { normalizeConversation } from './normalize.js';
 import { CATALOG_LIMITS, splitCatalogWindow } from './sourceCatalog.js';
@@ -9,11 +10,15 @@ import { normalizeConversationEvidence } from './sourceEvidence.js';
 import { validateSourceWindow } from './sourceRequestIdentity.js';
 import { isApprovedChatCatalogSeed } from './sourcePolicy.js';
 import { assertSourceEvidenceBudget } from './evidenceSecurity.js';
-const PAGE_SIZE = 50;
-const pageSchema = z.object({
-    content: z.array(z.unknown()).max(PAGE_SIZE),
+import { mapWithConcurrency } from './boundedPool.js';
+const DEFAULT_OPTIONS = { pageSize: 50, concurrency: 4 };
+// A few malformed records are quarantined; a changed upstream contract still fails closed.
+const MIN_ANOMALY_BUDGET = 5;
+const MAX_ANOMALY_SHARE = 0.02;
+const pageSchemaFor = (size) => z.object({
+    content: z.array(z.unknown()).max(size),
     number: z.number().int().nonnegative(),
-    size: z.literal(PAGE_SIZE),
+    size: z.literal(size),
     totalElements: z.number().int().nonnegative().max(CATALOG_LIMITS.globalRecords),
     totalPages: z.number().int().nonnegative(),
     numberOfElements: z.number().int().nonnegative(),
@@ -21,15 +26,26 @@ const pageSchema = z.object({
     last: z.boolean(),
     empty: z.boolean(),
 });
+const pageIds = (page) => JSON.stringify(page.content.map((raw) => raw?.id ?? null));
 export class HttpChatSourceClient {
-    maxSyncWindowMs = 30 * 60_000;
+    // Catalog reads are search-only, so a whole Baku day fits one bounded chunk.
+    maxSyncWindowMs = 24 * 60 * 60_000;
     maxSyncDurationMs = 4 * 60_000;
+    /** Single malformed rows skipped by the latest catalog read. */
+    lastCatalogAnomalies = 0;
     transport;
+    options;
+    pageSchema;
     tabId = randomUUID();
     constructor(config, deps = {}) {
-        this.transport = deps.transport ?? new CallsChatHttpTransport(config);
+        this.options = deps.options ?? DEFAULT_OPTIONS;
+        this.pageSchema = pageSchemaFor(this.options.pageSize);
+        this.transport =
+            deps.transport ??
+                new CallsChatHttpTransport(config, { concurrency: this.options.concurrency });
     }
     async search(window, number, dateField = 'completeDate', signal) {
+        const size = this.options.pageSize;
         // Whole source seconds, half-open windows. Client-side validation below prevents ignored filters.
         const payload = {
             fullTextSearch: null,
@@ -43,17 +59,16 @@ export class HttpChatSourceClient {
             },
             order: 'desc',
             page: number,
-            recordSize: PAGE_SIZE,
+            recordSize: size,
         };
-        const result = parse(pageSchema, await this.transport.request('POST', '/api/profile/request/searchRequest', payload, signal));
-        const expectedPages = Math.ceil(result.totalElements / PAGE_SIZE);
+        const result = parse(this.pageSchema, await this.transport.request('POST', '/api/profile/request/searchRequest', payload, signal));
+        const expectedPages = Math.ceil(result.totalElements / size);
         identity(result.number === number &&
             result.totalPages === expectedPages &&
             result.first === (number === 0));
         identity(result.last === number + 1 >= expectedPages && result.empty === (result.content.length === 0));
         identity(result.numberOfElements === result.content.length &&
-            result.content.length ===
-                Math.min(PAGE_SIZE, Math.max(0, result.totalElements - number * PAGE_SIZE)));
+            result.content.length === Math.min(size, Math.max(0, result.totalElements - number * size)));
         if (number > 0)
             identity(number < expectedPages);
         return result;
@@ -90,7 +105,8 @@ export class HttpChatSourceClient {
         identity(normalizeConversation(source).sourceComplete);
         return source;
     }
-    async listCompletedConversations(window, signal) {
+    /** Catalog metadata comes from search rows only; message bodies are read for sampled chats. */
+    async listCompletedConversations(window, signal, progress) {
         try {
             validateSourceWindow(window);
         }
@@ -101,6 +117,9 @@ export class HttpChatSourceClient {
         const seen = new Set();
         const sessions = new Set();
         let examined = 0;
+        let anomalies = 0;
+        let pagesDone = 0;
+        let pagesTotal = 0;
         const sourceWindow = {
             start: new Date(Math.floor(window.start.getTime() / 1000) * 1000),
             end: new Date(Math.ceil(window.end.getTime() / 1000) * 1000),
@@ -117,12 +136,20 @@ export class HttpChatSourceClient {
             if (first.totalElements > CATALOG_LIMITS.recordsPerSlice ||
                 examined + first.totalElements > CATALOG_LIMITS.globalRecords)
                 throw sourceFailureAtStage(new SourceDiagnosticError('source_catalog_limit'), 'seed_query');
-            for (let number = 0; number < Math.max(1, first.totalPages); number++) {
-                const current = number === 0 ? first : await this.search(slice, number, 'completeDate', signal);
+            pagesTotal += Math.max(1, first.totalPages);
+            pagesDone += 1;
+            progress?.({ pagesDone, pagesTotal });
+            const rest = await mapWithConcurrency(Array.from({ length: Math.max(0, first.totalPages - 1) }, (_, i) => i + 1), this.options.concurrency, async (number) => {
+                const page = await this.search(slice, number, 'completeDate', signal);
+                pagesDone += 1;
+                progress?.({ pagesDone, pagesTotal });
+                return page;
+            }, signal);
+            for (const current of [first, ...rest]) {
                 identity(current.totalElements === first.totalElements);
-                signal?.throwIfAborted();
                 for (const raw of current.content) {
                     signal?.throwIfAborted();
+                    // Identity and completion time stay fail-closed: they prove the filter and paging held.
                     const seed = parse(searchRowSchema, raw);
                     const completed = httpDate(seed.completeDate);
                     // API bounds are inclusive whole seconds, validate the exact local half-open slice too.
@@ -140,34 +167,41 @@ export class HttpChatSourceClient {
                             completedAt: completed,
                         }))
                         continue;
-                    if (seed.requestSource.chat.forwarded)
-                        continue; // Transfers require a separately verified API contract.
-                    const r = await this.detail(seed.id, signal);
-                    identity(r.status === seed.status &&
-                        r.completeDate === seed.completeDate &&
-                        r.queueName === seed.queueName &&
-                        r.type === seed.type &&
-                        r.communicationType === seed.communicationType &&
-                        r.requestSource.chat.conversationId === seed.requestSource.chat.conversationId &&
-                        r.requestSource.chat.channelId === seed.requestSource.chat.channelId);
-                    if (!isIsolatedHttpRequest(r))
+                    const row = searchCatalogRowSchema.safeParse(raw);
+                    if (!row.success) {
+                        anomalies++;
                         continue;
-                    const key = sessionKey(r.requestSource.chat.conversationId);
-                    identity(!sessions.has(key));
-                    sessions.add(key);
+                    }
+                    // Transfers and linked requests require a separately verified API contract.
+                    if (!isIsolatedSearchRow(row.data))
+                        continue;
                     if (completed < window.start || completed >= window.end)
                         continue;
-                    const source = await this.load(r, key, signal);
-                    rows.push(source.requests[0]); // Message bodies are transient; binaries are never requested.
+                    const key = sessionKey(row.data.requestSource.chat.conversationId);
+                    if (sessions.has(key)) {
+                        anomalies++;
+                        continue;
+                    }
+                    try {
+                        rows.push(searchCandidate(row.data, key));
+                        sessions.add(key);
+                    }
+                    catch {
+                        anomalies++;
+                    }
                 }
             }
             // Offset pagination is not a snapshot. Detect inserts/removals/reordering at its front boundary.
             if (first.totalPages > 1) {
                 const again = await this.search(slice, 0, 'completeDate', signal);
-                identity(again.totalElements === first.totalElements &&
-                    JSON.stringify(again.content) === JSON.stringify(first.content));
+                identity(again.totalElements === first.totalElements && pageIds(again) === pageIds(first));
             }
         }
+        this.lastCatalogAnomalies = anomalies;
+        if (anomalies > Math.max(MIN_ANOMALY_BUDGET, Math.ceil(examined * MAX_ANOMALY_SHARE)))
+            throw new SourceDiagnosticError('source_schema_invalid');
+        if (anomalies)
+            logger.warn({ anomalies, examined }, 'chat source rows quarantined');
         return rows;
     }
     async loadConversation(evidence, signal) {

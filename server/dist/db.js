@@ -32,6 +32,11 @@ export const db = new Database(dbPath);
 fs.chmodSync(dbPath, 0o600);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+// WAL keeps NORMAL durable across application crashes; wait instead of failing on short locks.
+db.pragma('synchronous = NORMAL');
+db.pragma('busy_timeout = 5000');
+db.pragma('temp_store = MEMORY');
+db.pragma('cache_size = -16000');
 db.exec(`
   CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,

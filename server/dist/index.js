@@ -255,8 +255,16 @@ app.use('/api', requireAdmin, analyticsRouter);
 app.use('/api', requireAdmin, settingsRouter);
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.resolve(moduleDir, '..', '..', 'dist');
-app.use(express.static(distDir));
+// Vite fingerprints /assets/*, so they can be cached for a year; the HTML shell always revalidates.
+app.use(express.static(distDir, {
+    setHeaders(res, file) {
+        res.setHeader('Cache-Control', file.startsWith(path.join(distDir, 'assets') + path.sep)
+            ? 'public, max-age=31536000, immutable'
+            : 'no-cache');
+    },
+}));
 app.get(/^(?!\/api).*/, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(distDir, 'index.html'), (err) => {
         if (err)
             res.status(404).send('Frontend not built. Run `npm run build` or use `npm run dev`.');

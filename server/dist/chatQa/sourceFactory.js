@@ -6,7 +6,7 @@ export function createChatSourceClient(config) {
     if (config.backend === 'http') {
         if (!config.http)
             throw new SourceDiagnosticError('source_connection_failed');
-        return new HttpChatSourceClient(config.http);
+        return new HttpChatSourceClient(config.http, { options: config.httpCatalog });
     }
     return config.backend === 'mysql'
         ? new MysqlChatSourceClient(config)

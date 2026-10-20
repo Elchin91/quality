@@ -22,6 +22,19 @@ export const searchRowSchema = z.object({
             .nullable(),
     }),
 });
+/** Search rows already carry the agent, topics and transfer links used by the catalog. */
+export const searchCatalogRowSchema = searchRowSchema.extend({
+    createdDate: short,
+    agentId: numericId.nullable().optional(),
+    agent: z.string().max(512).nullable().optional(),
+    topics: z
+        .array(z.object({ path: z.string().max(4096) }).passthrough())
+        .max(100)
+        .nullable()
+        .optional(),
+    parent: z.unknown().nullable().optional(),
+    linkedRequests: z.unknown().nullable().optional(),
+});
 const requestSchema = searchRowSchema.extend({
     createdDate: short,
     agent: z.object({ userId: numericId, firstName: short, lastName: short }).nullable(),
@@ -109,6 +122,31 @@ export function candidate(r, key) {
         agentMeaningfulMessageCount: null,
         distinctAgentCount: null,
     };
+}
+/** Catalog candidate without message aggregates; counts are verified only for sampled chats. */
+export function searchCandidate(r, key) {
+    identity(httpDate(r.createdDate).getTime() <= httpDate(r.completeDate).getTime());
+    return {
+        requestId: r.id,
+        conversationId: key,
+        queueName: r.queueName,
+        communicationType: r.communicationType,
+        requestType: r.type,
+        status: r.status,
+        completedAt: httpDate(r.completeDate),
+        agentUserId: r.agentId == null ? null : String(r.agentId),
+        agentName: r.agent?.trim() || null,
+        agentEmail: null,
+        classifiers: (r.topics ?? []).map((topic) => topic.path),
+        clientMeaningfulMessageCount: null,
+        agentMeaningfulMessageCount: null,
+        distinctAgentCount: null,
+    };
+}
+export function isIsolatedSearchRow(r) {
+    return (!r.requestSource.chat.forwarded &&
+        r.parent == null &&
+        (r.linkedRequests == null || (Array.isArray(r.linkedRequests) && r.linkedRequests.length === 0)));
 }
 export function parseMessages(raw, r, key) {
     const chat = r.requestSource.chat;

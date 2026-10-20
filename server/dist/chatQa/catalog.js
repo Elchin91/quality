@@ -87,6 +87,15 @@ function boundedClassifier(value) {
 function validCount(value) {
     return value !== null && Number.isInteger(value) && value >= 0;
 }
+function validAggregates(request) {
+    const counts = [
+        request.clientMeaningfulMessageCount,
+        request.agentMeaningfulMessageCount,
+        request.distinctAgentCount,
+    ];
+    // All three absent means "not yet verified"; a partial mix is never trusted.
+    return counts.every((count) => count === null) || counts.every(validCount);
+}
 function requestDate(candidate) {
     if (candidate.completedAt === null)
         return null;
@@ -143,9 +152,7 @@ export function buildChatCatalog(rows) {
             if (text(request.status)?.toUpperCase() === 'COMPLETED' && date === null) {
                 throw new PartialCatalogError('completed request without date');
             }
-            if (!validCount(request.clientMeaningfulMessageCount) ||
-                !validCount(request.agentMeaningfulMessageCount) ||
-                !validCount(request.distinctAgentCount)) {
+            if (!validAggregates(request)) {
                 throw new PartialCatalogError('invalid conversation aggregates');
             }
             const classifier = boundedClassifier(request.classifiers);

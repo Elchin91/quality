@@ -53,3 +53,18 @@ export function effectiveEvaluationTranscript(db, evaluationId, nowValue = Date.
         .get(evaluationId);
     return taskId ? effectiveTranscriptJson(db, taskId, nowValue) : null;
 }
+/**
+ * Drops catalog rows older than the retention window that never became a task. Rows with tasks
+ * (and therefore evaluations, appeals and evidence) are kept; requests cascade with their row.
+ */
+export function purgeStaleCatalog(db, nowValue = Date.now()) {
+    const now = safeNow(nowValue);
+    const retentionDays = db.prepare('SELECT retention_days FROM chat_sampling_policy WHERE id=1').get()?.retention_days;
+    if (!Number.isInteger(retentionDays) || retentionDays <= 0)
+        return 0;
+    return db
+        .prepare(`DELETE FROM source_interactions
+       WHERE completed_at_utc<? AND transcript_json IS NULL
+         AND NOT EXISTS (SELECT 1 FROM chat_qa_tasks t WHERE t.interaction_id=source_interactions.id)`)
+        .run(now - retentionDays * DAY_MS).changes;
+}
