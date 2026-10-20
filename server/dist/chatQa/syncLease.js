@@ -1,6 +1,7 @@
 import { CHAT_SCHEDULER_LEASE_MS, CHAT_SYNC_LEASE_MS } from './schema.js';
 import { fail } from './serviceSupport.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
+import { safeSourceFailureDetails, sourceFailureDetailsJson } from './sourceFailureDetails.js';
 export class SyncLeaseLostError extends Error {
 }
 const HEARTBEAT_MS = 60_000;
@@ -99,10 +100,10 @@ export function finishSyncLease(db, result, completedAt, leaseGeneration) {
         .prepare(`UPDATE chat_sync_runs SET
        status=?,completed_at=?,requests_seen=?,conversations_seen=?,eligible_count=?,
        excluded_count=?,proposed_mapping_count=?,proposed_task_count=?,
-       error_code=?,error_message=?
+       error_code=?,error_message=?,error_details_json=?
      WHERE id=? AND status='running' AND lease_generation=?
        AND COALESCE(lease_expires_at,started_at+?)>?`)
-        .run(result.status, completedAt, result.requestsSeen, result.conversationsSeen, result.eligibleCount, result.excludedCount, result.proposedMappingCount, result.proposedTaskCount, result.errorCode, result.errorMessage, result.runId, leaseGeneration, CHAT_SYNC_LEASE_MS, completedAt).changes;
+        .run(result.status, completedAt, result.requestsSeen, result.conversationsSeen, result.eligibleCount, result.excludedCount, result.proposedMappingCount, result.proposedTaskCount, result.errorCode, result.errorMessage, sourceFailureDetailsJson(result.errorDetails), result.runId, leaseGeneration, CHAT_SYNC_LEASE_MS, completedAt).changes;
     if (changes !== 1)
         throw new SyncLeaseLostError();
     return result;
@@ -117,8 +118,17 @@ export function finalizeSyncLease(db, result, completedAt, leaseGeneration) {
         throw new Error('Chat catalog synchronization failed');
     }
 }
-export function runResult(runId, mode, status, window, counters, errorCode = null, errorMessage = null) {
-    return { runId, mode, status, window, ...counters, errorCode, errorMessage };
+export function runResult(runId, mode, status, window, counters, errorCode = null, errorMessage = null, errorDetails = null) {
+    return {
+        runId,
+        mode,
+        status,
+        window,
+        ...counters,
+        errorCode,
+        errorMessage,
+        errorDetails: safeSourceFailureDetails(errorDetails),
+    };
 }
 export function finalizeSyncResult(db, result, completedAt, leaseGeneration) {
     if (result.mode === 'dry_run') {

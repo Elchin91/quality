@@ -2,17 +2,7 @@ import { normalizeAgentUserId, normalizeConversationId, normalizeMessageConversa
 import { normalizeRequestId } from './sourceRequestIdentity.js';
 import { toDate } from './sourceClientMapping.js';
 import { SourceDiagnosticError } from './sourceDiagnostics.js';
-const comparisonFields = [
-    'requestId',
-    'conversationId',
-    'messageConversationId',
-    'agentUserId',
-    'communicationType',
-    'requestType',
-    'queueName',
-    'status',
-    'completedAt',
-];
+import { MYSQL_IDENTITY_FIELDS as comparisonFields, } from './sourceFailureDetails.js';
 /** Fixed categories only: neither messages nor identifiers may cross this boundary. */
 export class MysqlChatIdentityError extends SourceDiagnosticError {
     reason;

@@ -284,6 +284,9 @@ export function createChatQaSchema(db, clock = () => new Date()) {
 
   `);
     const syncColumns = db.prepare('PRAGMA table_info(chat_sync_runs)').all();
+    if (!syncColumns.some(({ name }) => name === 'error_details_json')) {
+        db.exec('ALTER TABLE chat_sync_runs ADD COLUMN error_details_json TEXT');
+    }
     if (!syncColumns.some(({ name }) => name === 'lease_expires_at')) {
         db.exec('ALTER TABLE chat_sync_runs ADD COLUMN lease_expires_at INTEGER');
     }

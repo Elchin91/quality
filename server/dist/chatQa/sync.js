@@ -6,7 +6,7 @@ import { autoConfirmSuggestedMappings, backfillConfirmedInteractionMappings, cou
 import { assertSyncLease, finalizeSyncResult, runResult, finishSyncLease, startSyncLeaseHeartbeat, syncClockMs, SyncLeaseLostError, } from './syncLease.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 import { bakuMonth, bakuMonthBounds } from '../qaAutomation/types.js';
-import { safeSourceDiagnostic, sourceDiagnosticFromError, SOURCE_DIAGNOSTICS, } from './sourceDiagnostics.js';
+import { safeSourceDiagnostic, sourceDiagnosticFromError, sourceFailureDetailsFromError, SOURCE_DIAGNOSTICS, } from './sourceDiagnostics.js';
 const SOURCE_SYSTEM = 'm10';
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const SERVICE_FAILURE = 'Chat catalog synchronization failed';
@@ -198,7 +198,7 @@ export async function syncChatCatalog(input) {
             if (!health.ok) {
                 const code = safeSourceDiagnostic(health.errorCode);
                 const message = SOURCE_DIAGNOSTICS[code];
-                return finalizeSyncResult(input.db, runResult(runId, mode, 'failed', window, empty, code, message), syncClockMs(input.clock), leaseGeneration);
+                return finalizeSyncResult(input.db, runResult(runId, mode, 'failed', window, empty, code, message, health.errorDetails), syncClockMs(input.clock), leaseGeneration);
             }
             rows = await input.source.listCompletedConversations(window);
             input.signal?.throwIfAborted();
@@ -209,7 +209,7 @@ export async function syncChatCatalog(input) {
             input.assertOwnership?.();
             const code = sourceDiagnosticFromError(error);
             const message = SOURCE_DIAGNOSTICS[code];
-            return finalizeSyncResult(input.db, runResult(runId, mode, 'failed', window, empty, code, message), syncClockMs(input.clock), leaseGeneration);
+            return finalizeSyncResult(input.db, runResult(runId, mode, 'failed', window, empty, code, message, sourceFailureDetailsFromError(error)), syncClockMs(input.clock), leaseGeneration);
         }
         let catalog;
         try {

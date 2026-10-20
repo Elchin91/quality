@@ -273,6 +273,7 @@ export function createEventStreamHandler(options) {
         if (req.user.must_change_password)
             return res.status(403).json({ error: 'password change required' });
         let cursor;
+        let initialSnapshot = req.get('last-event-id') === undefined;
         try {
             cursor = parseLastEventId(req.get('last-event-id'));
         }
@@ -351,6 +352,19 @@ export function createEventStreamHandler(options) {
                     close();
                     return;
                 }
+            }
+            if (initialSnapshot) {
+                // A new page fetches current state; replaying days of row updates causes a refetch storm.
+                cursor = Number(options.db
+                    .prepare(`SELECT MAX(
+          (SELECT COALESCE(MAX(id),0) FROM app_events),
+          (SELECT last_purged_id FROM app_event_state WHERE singleton=1)
+        )`)
+                    .pluck()
+                    .get());
+                initialSnapshot = false;
+                write(`id: ${cursor}\nevent: reset\ndata: {"reason":"initial_snapshot"}\n\n`);
+                return;
             }
             const replay = listAppEvents(options.db, {
                 afterId: cursor,

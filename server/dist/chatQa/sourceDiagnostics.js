@@ -1,3 +1,4 @@
+import { safeSourceFailureDetails, } from './sourceFailureDetails.js';
 /** Only these fixed categories may cross the private source error boundary. */
 export const SOURCE_DIAGNOSTICS = {
     source_route_unavailable: 'Corporate VPN route is unavailable',
@@ -18,10 +19,26 @@ export function safeSourceDiagnostic(code) {
 }
 export class SourceDiagnosticError extends Error {
     code;
+    details = null;
     constructor(code) {
         super(SOURCE_DIAGNOSTICS[code]);
         this.code = code;
     }
+}
+export function sourceFailureDetailsFromError(error) {
+    return error instanceof SourceDiagnosticError ? safeSourceFailureDetails(error.details) : null;
+}
+export function sourceFailureAtStage(error, stage) {
+    const failure = error instanceof SourceDiagnosticError
+        ? error
+        : new SourceDiagnosticError(sourceDiagnosticFromError(error));
+    const identity = failure;
+    failure.details = safeSourceFailureDetails({
+        stage,
+        reason: identity.reason,
+        fields: identity.fields,
+    });
+    return failure;
 }
 /** Classify known internal errors; never forward a driver message or its cause. */
 export function sourceDiagnosticFromError(error, fallback = 'source_catalog_failed') {

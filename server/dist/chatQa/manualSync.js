@@ -1,7 +1,8 @@
 import { nanoid } from 'nanoid';
 import { DurableJobRepository } from '../jobs/repository.js';
 import { syncChatCatalog } from './sync.js';
-import { sourceDiagnosticFromError } from './sourceDiagnostics.js';
+import { sourceDiagnosticFromError, sourceFailureDetailsFromError } from './sourceDiagnostics.js';
+import { sourceFailureDetailsDto, sourceFailureDetailsJson } from './sourceFailureDetails.js';
 const MIN_CHUNK_MS = 60_000;
 function read(db, id) {
     return id
@@ -17,13 +18,13 @@ function effectiveOperation(db, row) {
         .prepare('SELECT status,cancelled_at FROM durable_jobs WHERE id=?')
         .get(row.job_id);
     if (!job || job.status === 'dead' || job.cancelled_at !== null)
-        return { ...row, status: 'failed', error_code: 'sync_cancelled' };
+        return { ...row, status: 'failed', error_code: 'sync_cancelled', error_details_json: null };
     return { ...row, status: job.status === 'running' ? 'running' : 'queued' };
 }
 function dto(row) {
     const { requested_by: _actor, job_id: _job, batch_window_ms: _batch, ...safe } = row;
     void [_actor, _job, _batch]; // Internal ownership and queue fields stay server-side.
-    return safe;
+    return sourceFailureDetailsDto(safe);
 }
 export function getManualChatSync(db, id) {
     const row = read(db, id);
@@ -122,7 +123,7 @@ export async function runManualChatSync(input) {
             const done = succeeded && end >= operation.window_to;
             db.prepare(`UPDATE chat_source_sync_operations SET status=?,cursor_at=?,chunks_completed=chunks_completed+?,
         conversations_seen=conversations_seen+?,eligible_count=eligible_count+?,excluded_count=excluded_count+?,
-        error_code=?,completed_at=?,updated_at=? WHERE id=?`).run(succeeded ? (done ? 'succeeded' : 'queued') : result.status, succeeded ? end : operation.cursor_at, succeeded ? 1 : 0, result.conversationsSeen, result.eligibleCount, result.excludedCount, result.errorCode, done || !succeeded ? clock().getTime() : null, clock().getTime(), operation.id);
+        error_code=?,error_details_json=?,completed_at=?,updated_at=? WHERE id=?`).run(succeeded ? (done ? 'succeeded' : 'queued') : result.status, succeeded ? end : operation.cursor_at, succeeded ? 1 : 0, result.conversationsSeen, result.eligibleCount, result.excludedCount, result.errorCode, sourceFailureDetailsJson(result.errorDetails), done || !succeeded ? clock().getTime() : null, clock().getTime(), operation.id);
             if (succeeded && !done)
                 enqueueChunk(db, read(db, operation.id), clock().getTime());
         }).immediate();
@@ -132,6 +133,6 @@ export async function runManualChatSync(input) {
         input.assertOwnership?.();
         if (error instanceof Error && ['sync_in_progress', 'sync_lease_lost'].includes(error.message))
             throw error;
-        db.prepare("UPDATE chat_source_sync_operations SET status='failed',error_code=?,completed_at=?,updated_at=? WHERE id=? AND cursor_at=?").run(sourceDiagnosticFromError(error), clock().getTime(), clock().getTime(), operation.id, operation.cursor_at);
+        db.prepare("UPDATE chat_source_sync_operations SET status='failed',error_code=?,error_details_json=?,completed_at=?,updated_at=? WHERE id=? AND cursor_at=?").run(sourceDiagnosticFromError(error), sourceFailureDetailsJson(sourceFailureDetailsFromError(error)), clock().getTime(), clock().getTime(), operation.id, operation.cursor_at);
     }
 }

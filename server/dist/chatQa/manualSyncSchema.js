@@ -24,4 +24,7 @@ export function createManualChatSyncSchema(db) {
     if (!columns.some((column) => column.name === 'batch_window_ms')) {
         db.exec('ALTER TABLE chat_source_sync_operations ADD COLUMN batch_window_ms INTEGER NOT NULL DEFAULT 604800000 CHECK(batch_window_ms BETWEEN 60000 AND 604800000)');
     }
+    if (!columns.some((column) => column.name === 'error_details_json')) {
+        db.exec('ALTER TABLE chat_source_sync_operations ADD COLUMN error_details_json TEXT');
+    }
 }

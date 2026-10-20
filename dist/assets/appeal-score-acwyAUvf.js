@@ -1,0 +1,1 @@
+import{p as e}from"./index-BohlPPOT.js";function t(t){let n=e.map(e=>t[e]).filter(e=>typeof e==`number`&&Number.isFinite(e)),r=32+(typeof t.risk_management==`number`?4:0);return Math.min(100,n.reduce((e,t)=>e+t,0)*100/r)}function n(t,n){return e.every(e=>t[e]===n[e])}export{n,t};

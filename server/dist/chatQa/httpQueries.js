@@ -4,6 +4,7 @@ import { participantCandidates } from './adminMetadata.js';
 import { sanitizeReviewerActivityReason } from './evidenceSecurity.js';
 import { effectiveTranscriptJson } from './retention.js';
 import { retainedTranscriptInterval } from './schema.js';
+import { sourceFailureDetailsDto } from './sourceFailureDetails.js';
 import { configuredDefaultCapacity, reviewerReadiness, reviewerReadinessMap, } from '../reviewerAssignment/repository.js';
 function add(filters, args, clause, value) {
     if (value !== undefined) {
@@ -33,12 +34,12 @@ export function listSyncRuns(db, page) {
     const items = db
         .prepare(`SELECT id,mode,status,window_from,window_to,started_at,completed_at,requests_seen,
        conversations_seen,eligible_count,excluded_count,proposed_mapping_count,
-       proposed_task_count,error_code,error_message
+       proposed_task_count,error_code,error_message,error_details_json
        FROM chat_sync_runs ORDER BY started_at DESC,id DESC LIMIT ? OFFSET ?`)
         .all(page.page_size, offset);
     const total = db.prepare('SELECT COUNT(*) count FROM chat_sync_runs').get()
         .count;
-    return pageResult(items, total, page.page, page.page_size);
+    return pageResult(items.map(sourceFailureDetailsDto), total, page.page, page.page_size);
 }
 function interactionDto(db, row) {
     return {

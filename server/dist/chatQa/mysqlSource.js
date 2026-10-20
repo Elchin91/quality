@@ -4,7 +4,7 @@ import { assertLaptopVpnRoute, monitorLaptopVpnRoute } from '../sourceVpnRoute.j
 import { assertSourceEvidenceBudget, MAX_MESSAGES_PER_CONVERSATION } from './evidenceSecurity.js';
 import { batchCatalogValues, CATALOG_LIMITS, readCatalogSiblingBatches, splitCatalogWindow, } from './sourceCatalog.js';
 import { allowsCorporateMysql } from './sourceConfig.js';
-import { SourceDiagnosticError, sourceDiagnosticFromError } from './sourceDiagnostics.js';
+import { sourceFailureAtStage, sourceDiagnosticFromError } from './sourceDiagnostics.js';
 import { loadSourceAgentDirectory } from './sourceDirectory.js';
 import { normalizeConversationEvidence } from './sourceEvidence.js';
 import { summarizeMysqlIdentityRows, } from './mysqlIdentityDiagnostics.js';
@@ -140,8 +140,8 @@ export class MysqlChatSourceClient {
        LIMIT ${boundedSqlLimit(limit, CATALOG_LIMITS.recordsPerSlice + 1)}`, [...(window ? [window.start, window.end] : []), 'in', ...APPROVED_CHAT_QUEUE_NAMES]);
         return rows;
     }
-    async siblings(ids) {
-        this.observe?.({ stage: 'sibling_query' });
+    async siblings(ids, observe = this.observe) {
+        observe?.({ stage: 'sibling_query' });
         const rows = await readCatalogSiblingBatches({
             conversationIds: ids,
             overflow: (kind) => sourceFailure(`sibling ${kind} size`),
@@ -154,8 +154,10 @@ export class MysqlChatSourceClient {
                 return result;
             },
         });
-        if (this.observe)
-            this.observe({ stage: 'sibling_normalization', ...summarizeMysqlIdentityRows(rows) });
+        observe?.({
+            stage: 'sibling_normalization',
+            ...(this.observe ? summarizeMysqlIdentityRows(rows) : {}),
+        });
         const requests = mysqlChatRequests(rows);
         const allowed = new Set(ids);
         if (requests.some((item) => !allowed.has(item.conversationId)))
@@ -227,6 +229,8 @@ export class MysqlChatSourceClient {
                     : stage === 'schema'
                         ? 'source_schema_invalid'
                         : 'source_preflight_failed'),
+                errorDetails: sourceFailureAtStage(error, stage === 'join' ? 'preflight_join' : stage)
+                    .details,
             };
         }
     }
@@ -277,12 +281,17 @@ export class MysqlChatSourceClient {
     }
     async listCompletedConversations(window) {
         validateSourceWindow(window);
+        let stage = 'connection';
+        const observe = (event) => {
+            stage = event.stage;
+            this.observe?.(event);
+        };
         try {
-            this.observe?.({ stage: 'connection' });
+            observe({ stage: 'connection' });
             await this.connect();
             const seedRows = [];
             for (const slice of splitCatalogWindow(window)) {
-                this.observe?.({ stage: 'seed_query' });
+                observe({ stage: 'seed_query' });
                 const rows = await this.seedRows(slice);
                 if (rows.length > CATALOG_LIMITS.recordsPerSlice)
                     throw sourceFailure('catalog slice size');
@@ -290,17 +299,19 @@ export class MysqlChatSourceClient {
                     throw sourceFailure('catalog global size');
                 seedRows.push(...rows);
             }
-            if (this.observe)
-                this.observe({ stage: 'seed_normalization', ...summarizeMysqlIdentityRows(seedRows) });
+            observe({
+                stage: 'seed_normalization',
+                ...(this.observe ? summarizeMysqlIdentityRows(seedRows) : {}),
+            });
             const seeds = mysqlChatRequests(seedRows);
             const rejected = seeds.filter((item) => !isApprovedChatCatalogSeed(item)).length;
-            this.observe?.({ stage: 'seed_policy', rows: seeds.length, rejected });
+            observe({ stage: 'seed_policy', rows: seeds.length, rejected });
             if (rejected)
                 throw new MysqlChatIdentityError('seed_not_eligible');
             if (!seeds.length)
                 return [];
-            const requests = await this.siblings([...new Set(seeds.map((item) => item.conversationId))]);
-            this.observe?.({ stage: 'seed_consistency' });
+            const requests = await this.siblings([...new Set(seeds.map((item) => item.conversationId))], observe);
+            observe({ stage: 'seed_consistency' });
             const byId = new Map(requests.map((item) => [item.requestId, item]));
             for (const seed of seeds) {
                 const current = byId.get(seed.requestId);
@@ -309,15 +320,15 @@ export class MysqlChatSourceClient {
                 if (!sameMysqlChatRequest(seed, current))
                     throw new MysqlChatIdentityError('seed_changed_between_reads', mysqlChatRequestDifferences(seed, current));
             }
-            this.observe?.({ stage: 'message_counts' });
+            observe({ stage: 'message_counts' });
             const result = await aggregates.loadRequestAggregates(requests, (item) => item.conversationId, (item) => item.messageConversationId, (ids) => this.counts(ids));
             if (!result.requests.length)
                 throw new MysqlChatIdentityError('no_complete_message_counts');
-            this.observe?.({ stage: 'topics' });
+            observe({ stage: 'topics' });
             await this.addTopics(result.requests);
-            this.observe?.({ stage: 'agent_directory' });
+            observe({ stage: 'agent_directory' });
             const directory = await loadSourceAgentDirectory(this.pool, normalizedAgentUserIds(result.requests.map((item) => item.agentUserId)));
-            this.observe?.({
+            observe({
                 stage: 'complete',
                 rows: result.requests.length,
                 missingAgents: normalizedAgentUserIds(result.requests.map((item) => item.agentUserId)).filter((id) => !directory.has(id)).length,
@@ -330,9 +341,7 @@ export class MysqlChatSourceClient {
             }));
         }
         catch (error) {
-            if (error instanceof SourceDiagnosticError)
-                throw error;
-            throw new SourceDiagnosticError(sourceDiagnosticFromError(error));
+            throw sourceFailureAtStage(error, stage);
         }
     }
     async loadConversation(evidence) {
