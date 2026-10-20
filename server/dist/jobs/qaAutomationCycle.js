@@ -1,9 +1,12 @@
 import { runChatQaCycle } from '../chatQa/scheduler.js';
 import { refreshCurrentRoster } from '../qaAutomation/googleSheets.js';
-import { autoLinkRosterPeople, readRosterSnapshot } from '../qaAutomation/repository.js';
+import { autoLinkRosterPeople, readRosterSnapshot, rosterIsFresh, } from '../qaAutomation/repository.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { boundedOperation } from './boundedOperation.js';
 const ROSTER_REFRESH_MS = 60 * 60_000;
+// Servers without internet would otherwise wait on Google in every refill cycle.
+const ROSTER_RETRY_AFTER_FAILURE_MS = 6 * 60 * 60_000;
+const rosterFailures = new WeakMap();
 /** Each source is isolated so a lost VPN leg cannot suppress the other channel. */
 export async function runQaAutomationCycle(input) {
     const now = input.clock?.() ?? new Date();
@@ -20,7 +23,11 @@ export async function runQaAutomationCycle(input) {
         .get();
     const assignEnabled = assignmentSetting?.enabled === 1;
     const previous = readRosterSnapshot(input.db, previousBakuDay(now).date.slice(0, 7));
-    if (previous && now.getTime() - previous.fetchedAtMs < ROSTER_REFRESH_MS) {
+    const lastFailure = rosterFailures.get(input.db);
+    const backingOff = lastFailure !== undefined && now.getTime() - lastFailure < ROSTER_RETRY_AFTER_FAILURE_MS;
+    if (previous &&
+        (now.getTime() - previous.fetchedAtMs < ROSTER_REFRESH_MS ||
+            (backingOff && rosterIsFresh(previous, now.getTime())))) {
         try {
             autoLinkRosterPeople(input.db, previous.month, now.getTime());
             result.roster = 'fresh';
@@ -34,9 +41,12 @@ export async function runQaAutomationCycle(input) {
             if (input.signal.aborted)
                 throw new Error('job aborted');
             await boundedOperation(input.signal, 30_000, (signal) => (input.refreshRoster ?? refreshCurrentRoster)(input.db, { now, signal }));
+            rosterFailures.delete(input.db);
             result.roster = 'refreshed';
         }
         catch {
+            if (!input.signal.aborted)
+                rosterFailures.set(input.db, now.getTime());
             result.roster = 'unavailable';
         }
     }

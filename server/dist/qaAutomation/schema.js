@@ -59,5 +59,10 @@ export function createQaAutomationSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_qa_roster_system_link_events_person
       ON qa_roster_system_link_events(person_key,created_at_ms DESC);
   `);
+    const snapshotColumns = db.prepare('PRAGMA table_info(qa_roster_snapshots)').all();
+    // Uploaded CSV schedules stay valid until replaced; Google downloads keep their 24 h freshness.
+    if (!snapshotColumns.some(({ name }) => name === 'source_kind')) {
+        db.exec("ALTER TABLE qa_roster_snapshots ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'google' CHECK(source_kind IN ('google','upload'))");
+    }
     db.prepare('INSERT OR IGNORE INTO qa_automation_settings (id,enabled,updated_at_ms) VALUES (1,0,0)').run();
 }

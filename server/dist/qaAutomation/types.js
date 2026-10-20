@@ -1,5 +1,9 @@
 export const MONTHLY_EVALUATION_TARGET = 20;
 export const MAX_SNAPSHOT_AGE_MS = 24 * 60 * 60 * 1_000;
+/** An uploaded month schedule covers its month plus the next month's first-day carry-over. */
+export const MAX_UPLOADED_SNAPSHOT_AGE_MS = 62 * 24 * 60 * 60 * 1_000;
+/** Uploaded schedules use this placeholder sheet ID; real Google gids are never 0. */
+export const UPLOADED_ROSTER_GID = '0';
 /** Shared comparison key; never use a fuzzy match for automatic identity mapping. */
 export function normalizeRosterName(name) {
     return name.trim().normalize('NFKC').replace(/\s+/g, ' ').toLocaleLowerCase('az');

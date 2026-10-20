@@ -6,13 +6,30 @@ import { requireRole } from '../auth.js';
 import { DurableJobRepository } from '../jobs/repository.js';
 import { refreshCurrentRoster, rosterErrorCode } from '../qaAutomation/googleSheets.js';
 import { listRosterQuota, quotaFor } from '../qaAutomation/quota.js';
-import { confirmRosterLink, getAutomationEnabled, readRosterSnapshot, removeRosterLink, setAutomationEnabled, } from '../qaAutomation/repository.js';
+import { confirmRosterLink, getAutomationEnabled, readRosterSnapshot, removeRosterLink, saveRosterCsv, setAutomationEnabled, } from '../qaAutomation/repository.js';
+import { bakuMonth, UPLOADED_ROSTER_GID } from '../qaAutomation/types.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { listReviewerReadiness } from '../reviewerAssignment/repository.js';
 import { SOURCE_DIAGNOSTICS } from '../chatQa/sourceDiagnostics.js';
 const linkBody = z.object({ agent_id: z.string().min(1).max(128) }).strict();
 const settingBody = z.object({ enabled: z.boolean() }).strict();
 const personKey = z.string().min(1).max(250);
+const uploadBody = z
+    .object({
+    csv: z.string().min(1).max(5_000_000),
+    month: z
+        .string()
+        .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
+        .optional(),
+})
+    .strict();
+/** The review month, the current month, or the next one (uploaded ahead of time). */
+function uploadableMonths(now) {
+    const current = bakuMonth(now);
+    const [year, month] = current.split('-').map(Number);
+    const next = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`;
+    return [...new Set([previousBakuDay(now).date.slice(0, 7), current, next])];
+}
 function lastChannelSync(db) {
     const chat = db
         .prepare(`SELECT status,started_at,completed_at,error_code FROM chat_sync_runs
@@ -123,7 +140,11 @@ export function createQaAutomationRouter(db) {
                 due: operators.reduce((sum, item) => sum + item.due, 0),
                 shortfall: operators.reduce((sum, item) => sum + item.remaining, 0),
                 roster: snapshot
-                    ? { source_gid: snapshot.sourceGid, fetched_at_ms: snapshot.fetchedAtMs }
+                    ? {
+                        source_gid: snapshot.sourceGid,
+                        fetched_at_ms: snapshot.fetchedAtMs,
+                        source_kind: snapshot.sourceKind ?? 'google',
+                    }
                     : null,
                 operators,
                 agent_choices: db.prepare('SELECT id,name FROM agents ORDER BY name,id').all(),
@@ -148,6 +169,34 @@ export function createQaAutomationRouter(db) {
                 res.status(503).json({ error: rosterErrorCode(error) });
             }
         }));
+        // For servers without internet access: a month tab downloaded from Google Sheets as CSV.
+        router.post(`${base}/upload-roster`, (req, res) => {
+            const parsed = uploadBody.safeParse(req.body ?? {});
+            if (!parsed.success)
+                return res.status(400).json({ error: 'invalid_input' });
+            const now = Date.now();
+            const month = parsed.data.month ?? previousBakuDay(now).date.slice(0, 7);
+            if (!uploadableMonths(now).includes(month))
+                return res.status(400).json({ error: 'roster_month_unavailable' });
+            try {
+                const snapshot = saveRosterCsv(db, {
+                    month,
+                    sourceGid: UPLOADED_ROSTER_GID,
+                    fetchedAtMs: now,
+                    csv: parsed.data.csv.replace(/^\uFEFF/u, ''),
+                    sourceKind: 'upload',
+                });
+                res.json({
+                    month: snapshot.month,
+                    fetched_at_ms: snapshot.fetchedAtMs,
+                    people: snapshot.people.length,
+                    source_kind: 'upload',
+                });
+            }
+            catch {
+                res.status(422).json({ error: 'roster_schema_invalid' });
+            }
+        });
         router.post(`${base}/run`, (req, res) => {
             const parsed = z
                 .object({})

@@ -1,0 +1,1 @@
+var e=`/assets/NotoSans-D7-AVeX-.ttf`;export{e as default};

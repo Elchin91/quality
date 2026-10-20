@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { parseRosterCsv } from './rosterParser.js';
-import { MAX_SNAPSHOT_AGE_MS, normalizeRosterName, shiftStartMs, } from './types.js';
+import { MAX_SNAPSHOT_AGE_MS, MAX_UPLOADED_SNAPSHOT_AGE_MS, normalizeRosterName, shiftStartMs, } from './types.js';
 function auditSystemLink(db, input) {
     db.prepare(`INSERT INTO qa_roster_system_link_events
        (month,person_key,previous_agent_id,agent_id,action,created_at_ms)
@@ -125,6 +125,7 @@ const storedPersonSchema = z
 })
     .strict();
 export function saveRosterCsv(db, input) {
+    const sourceKind = input.sourceKind ?? 'google';
     if (!/^\d{1,20}$/.test(input.sourceGid))
         throw new Error('invalid roster sheet ID');
     if (!Number.isSafeInteger(input.fetchedAtMs) || input.fetchedAtMs < 0) {
@@ -136,20 +137,22 @@ export function saveRosterCsv(db, input) {
         sourceGid: input.sourceGid,
         fetchedAtMs: input.fetchedAtMs,
         people,
+        sourceKind,
     };
     const hash = createHash('sha256').update(input.csv).digest('hex');
     const work = () => {
         const update = db
             .prepare(`INSERT INTO qa_roster_snapshots
-       (month,source_gid,fetched_at_ms,source_sha256,people_json)
-     VALUES (?,?,?,?,?)
+       (month,source_gid,fetched_at_ms,source_sha256,people_json,source_kind)
+     VALUES (?,?,?,?,?,?)
      ON CONFLICT(month) DO UPDATE SET
        source_gid=excluded.source_gid,
        fetched_at_ms=excluded.fetched_at_ms,
        source_sha256=excluded.source_sha256,
-       people_json=excluded.people_json
+       people_json=excluded.people_json,
+       source_kind=excluded.source_kind
      WHERE excluded.fetched_at_ms >= qa_roster_snapshots.fetched_at_ms`)
-            .run(input.month, input.sourceGid, input.fetchedAtMs, hash, JSON.stringify(people));
+            .run(input.month, input.sourceGid, input.fetchedAtMs, hash, JSON.stringify(people), sourceKind);
         const effective = update.changes ? snapshot : readRosterSnapshot(db, input.month);
         autoLinkRosterPeople(db, input.month, input.fetchedAtMs);
         return effective;
@@ -158,7 +161,7 @@ export function saveRosterCsv(db, input) {
 }
 export function readRosterSnapshot(db, month) {
     const row = db
-        .prepare(`SELECT month,source_gid,fetched_at_ms,people_json
+        .prepare(`SELECT month,source_gid,fetched_at_ms,people_json,source_kind
          FROM qa_roster_snapshots WHERE month=?`)
         .get(month);
     if (!row)
@@ -187,12 +190,14 @@ export function readRosterSnapshot(db, month) {
         sourceGid: row.source_gid,
         fetchedAtMs: row.fetched_at_ms,
         people,
+        sourceKind: row.source_kind,
     };
 }
 export function rosterIsFresh(snapshot, nowMs) {
     return (Number.isSafeInteger(nowMs) &&
         nowMs >= snapshot.fetchedAtMs &&
-        nowMs - snapshot.fetchedAtMs <= MAX_SNAPSHOT_AGE_MS);
+        nowMs - snapshot.fetchedAtMs <=
+            (snapshot.sourceKind === 'upload' ? MAX_UPLOADED_SNAPSHOT_AGE_MS : MAX_SNAPSHOT_AGE_MS));
 }
 export function getAutomationEnabled(db) {
     const row = db.prepare('SELECT enabled FROM qa_automation_settings WHERE id=1').get();
