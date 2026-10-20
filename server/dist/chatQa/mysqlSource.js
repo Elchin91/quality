@@ -5,6 +5,7 @@ import { assertSourceEvidenceBudget, MAX_MESSAGES_PER_CONVERSATION } from './evi
 import { batchCatalogValues, CATALOG_LIMITS, readCatalogSiblingBatches, splitCatalogWindow, } from './sourceCatalog.js';
 import { allowsCorporateMysql } from './sourceConfig.js';
 import { sourceFailureAtStage, sourceDiagnosticFromError } from './sourceDiagnostics.js';
+import { executeOwnedMysql } from './mysqlQuery.js';
 import { loadSourceAgentDirectory } from './sourceDirectory.js';
 import { normalizeConversationEvidence } from './sourceEvidence.js';
 import { summarizeMysqlIdentityRows, } from './mysqlIdentityDiagnostics.js';
@@ -69,16 +70,19 @@ export class MysqlChatSourceClient {
             supportBigNumbers: true,
             bigNumberStrings: true,
         });
-        const execute = pool.execute.bind(pool);
         pool.execute = ((statement, values) => {
-            this.assertRoute();
-            return execute(typeof statement === 'string'
-                ? { sql: statement, timeout: this.config.queryTimeoutMs }
-                : { ...statement, timeout: statement.timeout ?? this.config.queryTimeoutMs }, values).then((result) => {
-                this.assertRoute();
-                if (pool !== this.pool || this.needsRecreate)
-                    throw sourceFailure('connection');
-                return result;
+            return executeOwnedMysql({
+                pool,
+                statement,
+                values,
+                timeoutMs: typeof statement === 'string'
+                    ? this.config.queryTimeoutMs
+                    : (statement.timeout ?? this.config.queryTimeoutMs),
+                assertRoute: () => {
+                    this.assertRoute();
+                    if (pool !== this.pool || this.needsRecreate)
+                        throw sourceFailure('connection');
+                },
             });
         });
         return pool;

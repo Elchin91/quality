@@ -6,6 +6,7 @@ import { loadChatSourceConfig } from './sourceConfig.js';
 import { MysqlChatIdentityError } from './mysqlSourceRows.js';
 import { SOURCE_DIAGNOSTICS, SourceDiagnosticError, sourceDiagnosticFromError, } from './sourceDiagnostics.js';
 import { validateSourceWindow } from './sourceRequestIdentity.js';
+import { runMysqlQueryPlanDiagnostic } from './mysqlQueryPlanDiagnostic.js';
 const deadline = async (work, ms) => {
     let timer;
     try {
@@ -97,14 +98,22 @@ export async function runMysqlIdentityDiagnostic(input = {}) {
             await deadline(source.close(), 3_000).catch(() => undefined);
     }
 }
+export function parseMysqlDiagnosticArgs(args) {
+    const plan = args[0] === '--plan';
+    const remaining = plan ? args.slice(1) : args;
+    if (remaining.length && !(remaining.length === 2 && remaining[0] === '--db'))
+        return null;
+    return { plan, dbPath: remaining[1] };
+}
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-    const args = process.argv.slice(2);
-    if (args.length && !(args.length === 2 && args[0] === '--db')) {
-        console.error('Usage: node server/dist/chatQa/mysqlIdentityDiagnosticCli.js [--db /absolute/path/data.db]');
+    const options = parseMysqlDiagnosticArgs(process.argv.slice(2));
+    if (!options) {
+        console.error('Usage: node server/dist/chatQa/mysqlIdentityDiagnosticCli.js [--plan] [--db /absolute/path/data.db]');
         process.exitCode = 2;
     }
     else {
-        runMysqlIdentityDiagnostic({ dbPath: args[1] })
+        const run = options.plan ? runMysqlQueryPlanDiagnostic : runMysqlIdentityDiagnostic;
+        run({ dbPath: options.dbPath })
             .then((result) => {
             process.stdout.write(`${JSON.stringify(result)}\n`, () => process.exit(result.ok ? 0 : 2));
         })
