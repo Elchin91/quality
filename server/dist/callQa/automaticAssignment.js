@@ -132,7 +132,9 @@ export function assignAutomaticCallQaTask(input) {
             const evaluationsExist = db
                 .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evaluations'")
                 .get();
-            if (db.prepare('SELECT 1 FROM call_qa_tasks WHERE source_record_id=?').get(source.id) ||
+            if (db
+                .prepare("SELECT 1 FROM call_qa_tasks WHERE source_record_id=? AND status<>'cancelled'")
+                .get(source.id) ||
                 (evaluationsExist &&
                     db.prepare('SELECT 1 FROM evaluations WHERE source_ref=?').get(`call-qa:${source.id}`)))
                 fail('duplicate_task');

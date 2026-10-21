@@ -3,6 +3,7 @@ import { callSourceRecordsTableSql, migrateCallSourceEligibilityDefaults, regist
 import { createCallQaScorecardGuards } from './completionSchema.js';
 import { migrateCallQaSystemEvents } from './automaticSchema.js';
 import { ensureCallQaEvaluationForeignKey, hasFullEvaluationSchema } from './evaluationSchema.js';
+import { allowCallReassignmentAfterCancel } from './reassignSchema.js';
 import { normalizeCallInterval } from './time.js';
 import { createReviewerAssignmentSchema } from '../reviewerAssignment/repository.js';
 const validationFunctionDatabases = new WeakSet();
@@ -119,7 +120,7 @@ export function createCallQaSchema(db) {
     db.exec(`
     CREATE TABLE IF NOT EXISTS call_qa_tasks (
       id TEXT PRIMARY KEY,
-      source_record_id TEXT NOT NULL UNIQUE REFERENCES call_source_records(id) ON DELETE RESTRICT,
+      source_record_id TEXT NOT NULL REFERENCES call_source_records(id) ON DELETE RESTRICT,
       agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
       reviewer_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
       status TEXT NOT NULL CHECK(status IN ('assigned','in_progress','completed','cancelled')),
@@ -223,6 +224,7 @@ export function createCallQaSchema(db) {
     addColumnIfMissing(db, 'call_qa_tasks', 'version', 'INTEGER NOT NULL DEFAULT 1 CHECK(version >= 1)');
     addColumnIfMissing(db, 'call_qa_tasks', 'evaluation_id', `TEXT${evaluationReference}`);
     ensureCallQaEvaluationForeignKey(db, evaluationSchemaReady);
+    allowCallReassignmentAfterCancel(db);
     addColumnIfMissing(db, 'call_qa_events', 'source_record_id', 'TEXT REFERENCES call_source_records(id) ON DELETE RESTRICT');
     addColumnIfMissing(db, 'call_qa_events', 'actor_role', "TEXT CHECK(actor_role IS NULL OR actor_role IN ('admin','reviewer','system'))");
     migrateOperationalEventSubjects(db);

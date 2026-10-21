@@ -44,36 +44,68 @@ export function planQaReset(db) {
         })),
     };
 }
+const RETRIES = 5;
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+function stillOpen(db, task) {
+    const table = task.channel === 'chat' ? 'chat_qa_tasks' : 'call_qa_tasks';
+    return db
+        .prepare(`SELECT id,'${task.channel}' channel,agent_id,reviewer_user_id,
+        ${task.channel === 'call' ? 'version' : 'NULL version'}
+       FROM ${table} WHERE id=? AND status IN ('assigned','in_progress')`)
+        .get(task.id);
+}
 /**
  * Cancels every open chat and call task through the normal lifecycle (audited events).
  * Automation is paused meanwhile so each cancellation does not queue its own refill;
  * the previous setting is restored and the next automation cycle redistributes.
+ * A busy database is retried; tasks that still fail are reported, not fatal.
  */
-export function applyQaReset(db, actorUserId, nowMs) {
+export function applyQaReset(db, actorUserId, nowMs, retryDelayMs = 1_000) {
     const enabled = getAutomationEnabled(db);
     const clock = () => new Date(nowMs);
     let cancelled = 0;
+    let alreadyClosed = 0;
+    const failed = [];
     if (enabled)
         setAutomationEnabled(db, { enabled: false, adminUserId: actorUserId, nowMs });
     try {
-        for (const task of openTasks(db)) {
-            if (task.channel === 'chat')
-                cancelTask({ db, taskId: task.id, actorUserId, reason: RESET_REASON, clock });
-            else
-                cancelCallQaTask({
-                    db,
-                    taskId: task.id,
-                    actorUserId,
-                    reason: RESET_REASON,
-                    expectedVersion: task.version,
-                    clock,
-                });
-            cancelled += 1;
+        for (const listed of openTasks(db)) {
+            let code = '';
+            for (let attempt = 0; attempt < RETRIES; attempt += 1) {
+                const task = stillOpen(db, listed);
+                if (!task) {
+                    alreadyClosed += 1;
+                    code = '';
+                    break;
+                }
+                try {
+                    if (task.channel === 'chat')
+                        cancelTask({ db, taskId: task.id, actorUserId, reason: RESET_REASON, clock });
+                    else
+                        cancelCallQaTask({
+                            db,
+                            taskId: task.id,
+                            actorUserId,
+                            reason: RESET_REASON,
+                            expectedVersion: task.version,
+                            clock,
+                        });
+                    cancelled += 1;
+                    code = '';
+                    break;
+                }
+                catch (error) {
+                    code = String(error.code ?? error.message);
+                    pause(retryDelayMs);
+                }
+            }
+            if (code)
+                failed.push({ channel: listed.channel, taskId: listed.id, code });
         }
     }
     finally {
         if (enabled)
             setAutomationEnabled(db, { enabled: true, adminUserId: actorUserId, nowMs });
     }
-    return { cancelled, automationEnabled: enabled };
+    return { cancelled, alreadyClosed, failed, automationEnabled: enabled };
 }

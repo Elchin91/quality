@@ -20,10 +20,13 @@ const reviewSourceShape = z.object({
     quality_profile: z.enum(['baseline', 'pilot']).optional(),
     transcript_text: z.string().max(500_000).nullable().optional(),
     refined_text: z.string().max(500_000).nullable().optional(),
-    confirmed_segments: z.object({
+    confirmed_segments: z
+        .object({
         schema_version: z.literal(1),
         corrections: z.array(z.object({ item_index: z.number().int().nonnegative(), text: z.string().max(2_000) })),
-    }).nullable().optional(),
+    })
+        .nullable()
+        .optional(),
     quality: z
         .unknown()
         .nullable()

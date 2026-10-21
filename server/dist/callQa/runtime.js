@@ -97,7 +97,10 @@ function adminSourceDetail(db, actorUserId, sourceRecordId) {
               records.queue_label,records.recording_status,records.first_seen_at,
               records.last_seen_at,tasks.id AS task_id,tasks.status AS task_status
          FROM call_source_records records
-         LEFT JOIN call_qa_tasks tasks ON tasks.source_record_id=records.id
+         LEFT JOIN call_qa_tasks tasks ON tasks.id=(
+           SELECT latest.id FROM call_qa_tasks latest WHERE latest.source_record_id=records.id
+           ORDER BY CASE WHEN latest.status<>'cancelled' THEN 0 ELSE 1 END,
+             latest.rowid DESC LIMIT 1)
         WHERE records.id=?`)
         .get(sourceRecordId);
     if (!row)

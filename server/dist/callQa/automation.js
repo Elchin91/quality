@@ -121,7 +121,7 @@ async function syncPreviousDay(dependencies, signal) {
 }
 function candidateSourceIds(dependencies) {
     const day = previousBakuDay(nowFrom(dependencies.clock));
-    // A cancelled source remains unique; its freed quota is filled from another recording.
+    // A cancelled task frees its recording again, as for chats.
     return dependencies.db
         .prepare(`SELECT records.id,records.agent_id
        FROM call_source_records records
@@ -132,7 +132,8 @@ function candidateSourceIds(dependencies) {
          AND records.agent_id IS NOT NULL AND records.eligibility_status='eligible'
          AND records.eligibility_decision_version=1 AND records.recording_locator IS NOT NULL
          AND ${callDirectionSql(dependencies.db, 'records')}
-         AND NOT EXISTS(SELECT 1 FROM call_qa_tasks tasks WHERE tasks.source_record_id=records.id)
+         AND NOT EXISTS(SELECT 1 FROM call_qa_tasks tasks
+           WHERE tasks.source_record_id=records.id AND tasks.status<>'cancelled')
        ORDER BY
          (SELECT COUNT(*) FROM call_qa_tasks tasks
           JOIN call_source_records prior ON prior.id=tasks.source_record_id

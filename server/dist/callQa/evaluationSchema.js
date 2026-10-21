@@ -17,7 +17,7 @@ const EVALUATION_COLUMNS = {
     evaluator_id: { type: 'TEXT', required: false },
     created_at: { type: 'INTEGER', required: true },
 };
-function quoted(name) {
+export function quoted(name) {
     return `"${name.replaceAll('"', '""')}"`;
 }
 export function hasFullEvaluationSchema(db) {
@@ -64,7 +64,7 @@ function linkedTaskTableSql(db) {
         throw new Error('invalid call qa task schema');
     return linked;
 }
-function dependentSchemaObjects(db) {
+export function dependentSchemaObjects(db) {
     return db
         .prepare(`SELECT type,name,sql FROM sqlite_master
        WHERE sql IS NOT NULL AND (

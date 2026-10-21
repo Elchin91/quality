@@ -186,7 +186,9 @@ export function assignCallQaTask(input) {
                     .get(source.recording_storage_key, source.recording_size_bytes, source.recording_mime_type)) {
                 fail('recording_not_ready');
             }
-            if (db.prepare('SELECT 1 FROM call_qa_tasks WHERE source_record_id = ?').get(source.id)) {
+            if (db
+                .prepare("SELECT 1 FROM call_qa_tasks WHERE source_record_id=? AND status<>'cancelled'")
+                .get(source.id)) {
                 fail('duplicate_task');
             }
             if (operatorMonthlyCapacity(db, source.agent_id, Date.parse(source.call_started_at_utc))

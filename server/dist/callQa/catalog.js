@@ -82,11 +82,16 @@ function whereClause(query) {
     }
     return { sql: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
 }
-/** Returns a bounded catalog page with its one-to-one task state in two SQL queries. */
+const LATEST_TASK_JOIN = `call_qa_tasks tasks ON tasks.id=(
+           SELECT latest.id FROM call_qa_tasks latest WHERE latest.source_record_id=records.id
+           ORDER BY CASE WHEN latest.status<>'cancelled' THEN 0 ELSE 1 END,
+             latest.rowid DESC LIMIT 1)`;
+/** Returns a bounded catalog page with each call's current task state in two SQL queries. */
 export function listCallCatalog(db, query) {
     validate(query);
     const where = whereClause(query);
-    const join = 'FROM call_source_records records LEFT JOIN call_qa_tasks tasks ON tasks.source_record_id=records.id';
+    // A call may carry cancelled tasks plus one live task; show the live one, else the latest.
+    const join = `FROM call_source_records records LEFT JOIN ${LATEST_TASK_JOIN}`;
     const total = db
         .prepare(`SELECT COUNT(*) AS count ${join} ${where.sql}`)
         .get(...where.params);

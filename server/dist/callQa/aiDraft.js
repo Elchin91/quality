@@ -263,9 +263,7 @@ export function saveCallQaTranscriptCorrections(input) {
                 fail('task_state_conflict');
             indices.add(correction.item_index);
         }
-        input.db
-            .prepare('UPDATE transcriptions SET confirmed_segments_json=? WHERE id=?')
-            .run(JSON.stringify({
+        input.db.prepare('UPDATE transcriptions SET confirmed_segments_json=? WHERE id=?').run(JSON.stringify({
             schema_version: 1,
             corrections: input.corrections,
             confirmed_by_user_id: input.reviewerUserId,
