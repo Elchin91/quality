@@ -29,6 +29,8 @@ const rowSchema = z
         .optional(),
 })
     .passthrough();
+const OMNICHANNEL_ID = /^\d{10}\.\d{3,6}$/;
+const MIN_OUTBOUND_TALK_SECONDS = 30;
 const elapsed = (started) => Math.round(performance.now() - started);
 const isNull = (value) => value === null || value === undefined;
 const emptyList = (value) => isNull(value) || (Array.isArray(value) && !value.length);
@@ -161,6 +163,32 @@ export async function runHttpProbe(input) {
         conversationMs.push(elapsed(started));
         messageCounts.push(Array.isArray(chat.messageList) ? chat.messageList.length : -1);
     }
+    const outbound = calls.filter((row) => row.type === 'out');
+    const answered = outbound.filter((row) => row.status === 'COMPLETED' &&
+        typeof row.talkDuration === 'number' &&
+        row.talkDuration >= MIN_OUTBOUND_TALK_SECONDS);
+    const withLocator = answered.filter((row) => typeof row.omniChannelId === 'string' && OMNICHANNEL_ID.test(row.omniChannelId));
+    const recordings = { checked: 0, found: 0, failed: 0 };
+    if (input.hasRecording) {
+        const step = Math.max(1, Math.floor(withLocator.length / 3));
+        for (const row of withLocator.filter((_, i) => i % step === 0).slice(0, 3)) {
+            recordings.checked++;
+            try {
+                if (await input.hasRecording(row.omniChannelId))
+                    recordings.found++;
+            }
+            catch {
+                recordings.failed++;
+            }
+        }
+    }
+    const outboundSummary = {
+        total: outbound.length,
+        answered30: answered.length,
+        locatorValid: withLocator.length,
+        withAgent: answered.filter((row) => typeof row.agentId === 'number').length,
+        recordings: input.hasRecording ? recordings : { skipped: 'recording_client_unavailable' },
+    };
     let callParity = { skipped: 'mysql_not_configured' };
     if (input.readMysqlCalls) {
         const mysqlStarted = performance.now();
@@ -234,5 +262,6 @@ export async function runHttpProbe(input) {
         searchVsDetail: { sample: sample.length, avgDetailMs: avg(detailMs), mismatches },
         conversation: { sample: conversationMs.length, avgMs: avg(conversationMs), messageCounts },
         callParity,
+        outbound: outboundSummary,
     };
 }

@@ -2,6 +2,7 @@ import mysql from 'mysql2/promise';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadRecordingConfig } from '../callQa/recordingConfig.js';
+import { CallsRecordingClient } from '../callQa/recordingClient.js';
 import { runHttpProbe } from './httpProbe.js';
 import { CallsChatHttpTransport } from './httpTransport.js';
 import { loadChatSourceConfig } from './sourceConfig.js';
@@ -58,15 +59,35 @@ function mysqlCallReader(env) {
 }
 export async function runHttpProbeCli(env = process.env) {
     let transport;
+    let recordings;
     try {
-        transport = new CallsChatHttpTransport(loadRecordingConfig(env));
+        const config = loadRecordingConfig(env);
+        transport = new CallsChatHttpTransport(config);
+        recordings = new CallsRecordingClient(config);
     }
     catch {
         return { ok: false, errorCode: 'diagnostic_configuration_invalid' };
     }
     const signal = AbortSignal.timeout(5 * 60_000);
+    // Opens the first non-empty recording leg and cancels it at once: existence only, no download.
+    const hasRecording = async (omnichannelId) => {
+        for await (const candidate of recordings.openRecordingCandidates({
+            kind: 'omnichannel_id',
+            // runHttpProbe passes only ids that already matched the observed omnichannel format.
+            value: `omnichannel:${omnichannelId}`,
+        }, signal)) {
+            await candidate.response.body?.cancel().catch(() => undefined);
+            return true;
+        }
+        return false;
+    };
     try {
-        return await runHttpProbe({ transport, signal, readMysqlCalls: mysqlCallReader(env) });
+        return await runHttpProbe({
+            transport,
+            signal,
+            readMysqlCalls: mysqlCallReader(env),
+            hasRecording,
+        });
     }
     catch (error) {
         return { ok: false, errorCode: sourceDiagnosticFromError(error) };
