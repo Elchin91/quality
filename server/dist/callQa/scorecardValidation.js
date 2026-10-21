@@ -1,4 +1,5 @@
 import { SCORECARD_CRITERIA, scoreShape } from '../prompts/scorecard.js';
+import { TELESALES_CRITERION_KEYS, } from '../prompts/telesalesScorecard.js';
 import { evaluationMetadataShape } from '../aiEvaluation/types.js';
 import { captureRuntimeInput, isSafeAuditText } from './runtimeInput.js';
 import { CallQaServiceError } from './errors.js';
@@ -33,10 +34,24 @@ export function validateCallQaCriteria(value, reject = invalidInput) {
     }
     return result;
 }
-export function validateCallQaNotes(value) {
-    const captured = captureRuntimeInput(value, [], criterionKeys, invalidInput);
+/** Telesales: all six criteria are required whole scores from 0 to 4 (no optional risk item). */
+export function validateTelesalesCriteria(value, reject = invalidInput) {
+    const captured = captureRuntimeInput(value, TELESALES_CRITERION_KEYS, [], reject);
     const result = {};
-    for (const key of criterionKeys) {
+    for (const key of TELESALES_CRITERION_KEYS) {
+        const score = captured[key];
+        if (typeof score === 'number' && Number.isInteger(score) && score >= 0 && score <= 4)
+            result[key] = score;
+        else
+            return reject();
+    }
+    return result;
+}
+export function validateCallQaNotes(value, kind = 'm10') {
+    const keys = kind === 'telesales' ? TELESALES_CRITERION_KEYS : criterionKeys;
+    const captured = captureRuntimeInput(value, [], keys, invalidInput);
+    const result = {};
+    for (const key of keys) {
         const note = captured[key];
         if (note === undefined)
             continue;

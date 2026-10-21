@@ -1,8 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod';
 import { logger } from '../logger.js';
 import { CallsChatHttpTransport } from './httpTransport.js';
-import { candidate, isIsolatedHttpRequest, isIsolatedSearchRow, httpDate, httpTimestamp, identity, parse, parseMessages, parseRequest, searchCandidate, searchCatalogRowSchema, searchRowSchema, sessionKey, } from './httpContract.js';
+import { candidate, isIsolatedHttpRequest, isIsolatedSearchRow, httpDate, identity, parse, parseMessages, parseRequest, searchCandidate, searchCatalogRowSchema, searchRowSchema, sessionKey, } from './httpContract.js';
 import { SourceDiagnosticError, sourceDiagnosticFromError, sourceFailureAtStage, } from './sourceDiagnostics.js';
 import { normalizeConversation } from './normalize.js';
 import { CATALOG_LIMITS, splitCatalogWindow } from './sourceCatalog.js';
@@ -11,22 +10,11 @@ import { validateSourceWindow } from './sourceRequestIdentity.js';
 import { isApprovedChatCatalogSeed } from './sourcePolicy.js';
 import { assertSourceEvidenceBudget } from './evidenceSecurity.js';
 import { mapWithConcurrency } from './boundedPool.js';
+import { CallsSearchPager, pageIds } from './callsSearch.js';
 const DEFAULT_OPTIONS = { pageSize: 50, concurrency: 4 };
 // A few malformed records are quarantined; a changed upstream contract still fails closed.
 const MIN_ANOMALY_BUDGET = 5;
 const MAX_ANOMALY_SHARE = 0.02;
-const pageSchemaFor = (size) => z.object({
-    content: z.array(z.unknown()).max(size),
-    number: z.number().int().nonnegative(),
-    size: z.literal(size),
-    totalElements: z.number().int().nonnegative().max(CATALOG_LIMITS.globalRecords),
-    totalPages: z.number().int().nonnegative(),
-    numberOfElements: z.number().int().nonnegative(),
-    first: z.boolean(),
-    last: z.boolean(),
-    empty: z.boolean(),
-});
-const pageIds = (page) => JSON.stringify(page.content.map((raw) => raw?.id ?? null));
 export class HttpChatSourceClient {
     // Catalog reads are search-only, so a whole Baku day fits one bounded chunk.
     maxSyncWindowMs = 24 * 60 * 60_000;
@@ -35,43 +23,17 @@ export class HttpChatSourceClient {
     lastCatalogAnomalies = 0;
     transport;
     options;
-    pageSchema;
+    pager;
     tabId = randomUUID();
     constructor(config, deps = {}) {
         this.options = deps.options ?? DEFAULT_OPTIONS;
-        this.pageSchema = pageSchemaFor(this.options.pageSize);
         this.transport =
             deps.transport ??
                 new CallsChatHttpTransport(config, { concurrency: this.options.concurrency });
+        this.pager = new CallsSearchPager(this.transport, this.options);
     }
-    async search(window, number, dateField = 'completeDate', signal) {
-        const size = this.options.pageSize;
-        // Whole source seconds, half-open windows. Client-side validation below prevents ignored filters.
-        const payload = {
-            fullTextSearch: null,
-            fieldName: null,
-            fieldSet: {
-                [dateField]: [
-                    httpTimestamp(window.start),
-                    httpTimestamp(new Date(window.end.getTime() - 1)),
-                ],
-                type: ['in', 'out', 'ivr', 'abandon', 'internal', null],
-            },
-            order: 'desc',
-            page: number,
-            recordSize: size,
-        };
-        const result = parse(this.pageSchema, await this.transport.request('POST', '/api/profile/request/searchRequest', payload, signal));
-        const expectedPages = Math.ceil(result.totalElements / size);
-        identity(result.number === number &&
-            result.totalPages === expectedPages &&
-            result.first === (number === 0));
-        identity(result.last === number + 1 >= expectedPages && result.empty === (result.content.length === 0));
-        identity(result.numberOfElements === result.content.length &&
-            result.content.length === Math.min(size, Math.max(0, result.totalElements - number * size)));
-        if (number > 0)
-            identity(number < expectedPages);
-        return result;
+    search(window, number, dateField = 'completeDate', signal) {
+        return this.pager.search(window, number, dateField, signal);
     }
     async preflight(signal) {
         try {

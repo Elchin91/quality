@@ -10,7 +10,7 @@ const TASK_STATUSES = new Set([
 const SAFE_TEXT = /^[^\u0000-\u001F\u007F]+$/u;
 const REVIEWER_VIEW_COLUMNS = `
   tasks.id AS task_id,tasks.status AS task_status,
-  tasks.version AS task_version,tasks.assigned_at_utc,tasks.started_at_utc,
+  tasks.version AS task_version,tasks.scorecard_kind,tasks.assigned_at_utc,tasks.started_at_utc,
   tasks.completed_at_utc,tasks.cancelled_at_utc,tasks.deadline_at_utc,
   agents.name AS agent_name,records.call_started_at_utc,
   records.call_ended_at_utc,records.baku_date,records.duration_seconds,
@@ -70,6 +70,7 @@ function taskView(row) {
         taskId: row.task_id,
         status: row.task_status,
         version: row.task_version,
+        scorecardKind: row.scorecard_kind === 'telesales' ? 'telesales' : 'm10',
         assignedAtUtc: row.assigned_at_utc,
         startedAtUtc: row.started_at_utc,
         completedAtUtc: row.completed_at_utc,

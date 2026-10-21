@@ -18,6 +18,17 @@ export async function runQaAutomationCycle(input) {
         chat: 'unavailable',
         call: 'unavailable',
     };
+    if (input.syncDirectory) {
+        try {
+            const outcome = await boundedOperation(input.signal, 60_000, (signal) => input.syncDirectory(signal));
+            result.directory = outcome.status;
+        }
+        catch {
+            if (input.signal.aborted)
+                throw new Error('job aborted');
+            result.directory = 'unavailable';
+        }
+    }
     const assignmentSetting = input.db
         .prepare('SELECT enabled FROM qa_automation_settings WHERE id=1')
         .get();

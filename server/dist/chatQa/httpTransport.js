@@ -157,6 +157,7 @@ export class CallsChatHttpTransport {
         const allowed = method === 'POST'
             ? path === '/api/profile/request/searchRequest'
             : path === '/api/users/all' ||
+                /^\/api\/users\/filterSearch\?search=&page=\d{1,3}&size=200$/.test(path) ||
                 /^\/api\/profile\/request\/requestById\?requestId=[0-9a-f-]{36}$/.test(path) ||
                 /^\/api\/omnichannel\/conversation\/[1-9]\d*\?activeTabId=[0-9a-f-]{36}$/.test(path);
         if (!allowed || (method === 'GET' && body !== undefined))

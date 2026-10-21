@@ -1,5 +1,6 @@
 import { nanoid } from 'nanoid';
 import { calculateM10Score, SCORECARD_CRITERIA } from '../prompts/scorecard.js';
+import { calculateTelesalesScore, evaluationScorecardKind, TELESALES_CRITERION_KEYS, } from '../prompts/telesalesScorecard.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 import { appealEligibility } from './date.js';
 import { normalizeAlias, selectEligibleReviewer } from './assignment.js';
@@ -15,6 +16,17 @@ function parseMetadata(json) {
 function runImmediate(db, fn) {
     const transaction = db.transaction(fn);
     return transaction.immediate();
+}
+/** Telesales evaluations are reviewed on their own six required criteria. */
+function validateTelesalesCriteria(criteria) {
+    const result = {};
+    for (const key of TELESALES_CRITERION_KEYS) {
+        const value = criteria[key];
+        if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 4)
+            throw new AppealError('appeal_state_conflict', 400);
+        result[key] = value;
+    }
+    return result;
 }
 function validateCriteria(criteria) {
     const base = [
@@ -268,7 +280,6 @@ export class AppealService {
         });
     }
     resolveReview(input) {
-        const criteria = validateCriteria(input.criteria);
         if (!input.note.trim())
             throw new AppealError('appeal_state_conflict', 400);
         return runImmediate(this.db, () => {
@@ -278,13 +289,20 @@ export class AppealService {
             if (appeal.assigned_reviewer_id !== input.reviewerUserId)
                 throw new AppealError('forbidden', 403);
             const evaluation = this.db
-                .prepare('SELECT score,criteria_json FROM evaluations WHERE id=?')
+                .prepare('SELECT score,criteria_json,source_metadata_json FROM evaluations WHERE id=?')
                 .get(appeal.evaluation_id);
+            const telesales = evaluationScorecardKind(evaluation.source_metadata_json) === 'telesales';
+            const criteria = telesales
+                ? validateTelesalesCriteria(input.criteria)
+                : validateCriteria(input.criteria);
             const prior = JSON.parse(evaluation.criteria_json);
-            const changed = SCORECARD_CRITERIA.some(({ key }) => prior[key] !== criteria[key]);
+            const keys = telesales ? TELESALES_CRITERION_KEYS : SCORECARD_CRITERIA.map(({ key }) => key);
+            const changed = keys.some((key) => prior[key] !== criteria[key]);
             const next = changed ? 'adjusted' : 'upheld';
             const now = Date.now();
-            const score = calculateM10Score(criteria);
+            const score = telesales
+                ? calculateTelesalesScore(criteria)
+                : calculateM10Score(criteria);
             this.db
                 .prepare(`INSERT INTO evaluation_revisions
         (id,evaluation_id,appeal_id,prior_score,prior_criteria_json,new_score,new_criteria_json,reviewer_user_id,reviewer_note,created_at)

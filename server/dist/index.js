@@ -62,9 +62,11 @@ import { createEventsRouter } from './routes/events.js';
 import { createQaPoliciesRouter } from './routes/qa-policies.js';
 import { createQaAutomationRouter } from './routes/qa-automation.js';
 import { runQaAutomationCycle } from './jobs/qaAutomationCycle.js';
+import { createCallsDirectorySyncer } from './callsDirectory/runtime.js';
 import { searchConfluence } from './confluence.js';
 export const app = express();
 const careSync = getCareSyncCoordinator(db);
+const callsDirectory = createCallsDirectorySyncer(db, process.env);
 export const chatQaRuntime = new ChatQaRuntime({
     db,
     env: process.env,
@@ -76,6 +78,7 @@ export const chatQaRuntime = new ChatQaRuntime({
             callCycle: (callSignal, assignEnabled, syncCalls) => callQaRuntime.automation.run(callSignal, assignEnabled, syncCalls),
             syncCatalog,
             signal,
+            syncDirectory: (directorySignal) => callsDirectory.sync({ signal: directorySignal }),
         });
     },
 });
@@ -208,7 +211,7 @@ app.use('/api/transcribe', aiLimiter);
 app.use('/api/uploads', uploadLimiter);
 app.use('/api', createEventsRouter(db));
 app.use('/api', createQaPoliciesRouter(db));
-app.use('/api', createQaAutomationRouter(db));
+app.use('/api', createQaAutomationRouter(db, { directory: callsDirectory }));
 app.use('/api', createReviewerDashboardRouter({ db }));
 // Agent-scoped portal.
 app.use('/api', meRouter);

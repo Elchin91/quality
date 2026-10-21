@@ -69,6 +69,9 @@ export async function generateCallQaAiDraft(input) {
     let sourceVersion;
     try {
         sourceVersion = requireDraftOwner(db, taskId, reviewerId);
+        // The AI reviewer is trained on the M10 checklist only; Telesales reviews stay manual.
+        if (db.prepare('SELECT scorecard_kind FROM call_qa_tasks WHERE id=?').get(taskId)?.scorecard_kind === 'telesales')
+            fail('task_state_conflict');
         transcriptRow = readTranscript(db, taskId, reviewerId);
     }
     catch (error) {
@@ -206,10 +209,12 @@ export function getCallQaReviewSource(db, taskId, reviewerId) {
 }
 const confirmedSegmentsSchema = z.object({
     schema_version: z.literal(1),
-    corrections: z.array(z.object({
+    corrections: z
+        .array(z.object({
         item_index: z.number().int().nonnegative(),
         text: z.string().trim().min(1).max(2_000),
-    })).max(10_000),
+    }))
+        .max(10_000),
 });
 function readConfirmedSegments(row) {
     if (!row?.confirmed_segments_json || !row.segments_json)
@@ -220,7 +225,8 @@ function readConfirmedSegments(row) {
         if (!parsed.success || !Array.isArray(segments))
             return null;
         const indices = parsed.data.corrections.map((item) => item.item_index);
-        if (new Set(indices).size !== indices.length || indices.some((index) => index >= segments.length))
+        if (new Set(indices).size !== indices.length ||
+            indices.some((index) => index >= segments.length))
             return null;
         return parsed.data;
     }
@@ -245,17 +251,26 @@ export function saveCallQaTranscriptCorrections(input) {
             fail('task_state_conflict');
         const indices = new Set();
         for (const correction of input.corrections) {
-            if (!Number.isInteger(correction.item_index) || correction.item_index < 0 ||
-                correction.item_index >= segments.length || indices.has(correction.item_index) ||
-                typeof correction.text !== 'string' || !correction.text.trim() ||
+            if (!Number.isInteger(correction.item_index) ||
+                correction.item_index < 0 ||
+                correction.item_index >= segments.length ||
+                indices.has(correction.item_index) ||
+                typeof correction.text !== 'string' ||
+                !correction.text.trim() ||
                 correction.text.length > 2_000 ||
                 // eslint-disable-next-line no-control-regex -- reviewer input boundary
                 /[\u0000-\u001F\u007F]/u.test(correction.text))
                 fail('task_state_conflict');
             indices.add(correction.item_index);
         }
-        input.db.prepare('UPDATE transcriptions SET confirmed_segments_json=? WHERE id=?').run(JSON.stringify({ schema_version: 1, corrections: input.corrections,
-            confirmed_by_user_id: input.reviewerUserId, confirmed_at: Date.now() }), row.id);
+        input.db
+            .prepare('UPDATE transcriptions SET confirmed_segments_json=? WHERE id=?')
+            .run(JSON.stringify({
+            schema_version: 1,
+            corrections: input.corrections,
+            confirmed_by_user_id: input.reviewerUserId,
+            confirmed_at: Date.now(),
+        }), row.id);
     })();
     return getCallQaReviewSource(input.db, input.taskId, input.reviewerUserId);
 }

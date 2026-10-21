@@ -11,6 +11,8 @@ import { bakuMonth, UPLOADED_ROSTER_GID } from '../qaAutomation/types.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { listReviewerReadiness } from '../reviewerAssignment/repository.js';
 import { SOURCE_DIAGNOSTICS } from '../chatQa/sourceDiagnostics.js';
+import { lastDirectorySync } from '../callsDirectory/sync.js';
+import { callDirectionSql } from '../callsDirectory/groups.js';
 const linkBody = z.object({ agent_id: z.string().min(1).max(128) }).strict();
 const settingBody = z.object({ enabled: z.boolean() }).strict();
 const personKey = z.string().min(1).max(250);
@@ -67,7 +69,7 @@ function lastChannelSync(db) {
             : null,
     };
 }
-export function createQaAutomationRouter(db) {
+export function createQaAutomationRouter(db, options = {}) {
     const router = Router();
     router.use(['/admin/chat-qa/automation', '/admin/call-qa/automation'], requireRole('admin'));
     for (const base of ['/admin/chat-qa/automation', '/admin/call-qa/automation']) {
@@ -98,7 +100,7 @@ export function createQaAutomationRouter(db) {
                     ? db
                         .prepare(`SELECT COUNT(*) count FROM call_source_records source
                    WHERE source.agent_id=? AND source.eligibility_status='eligible'
-                     AND source.baku_date=?
+                     AND source.baku_date=? AND ${callDirectionSql(db, 'source')}
                      AND NOT EXISTS(SELECT 1 FROM call_qa_tasks task
                        WHERE task.source_record_id=source.id)`)
                         .get(item.agentId, bounds.date).count
@@ -149,6 +151,7 @@ export function createQaAutomationRouter(db) {
                 operators,
                 agent_choices: db.prepare('SELECT id,name FROM agents ORDER BY name,id').all(),
                 last_job: lastJob ?? null,
+                directory: lastDirectorySync(db),
                 last_channel_sync: lastChannelSync(db),
                 reviewers: {
                     total: reviewerReadiness.length,
@@ -197,6 +200,18 @@ export function createQaAutomationRouter(db) {
                 res.status(422).json({ error: 'roster_schema_invalid' });
             }
         });
+        router.post(`${base}/directory/sync`, asyncHandler(async (req, res) => {
+            if (!options.directory)
+                return res.status(503).json({ error: 'directory_unconfigured' });
+            const outcome = await options.directory.sync({ actorUserId: req.user.id, force: true });
+            if (outcome.status !== 'synced')
+                return res.status(503).json({ error: `directory_${outcome.status}` });
+            res.json({
+                telesales: outcome.summary.telesales,
+                provisioned: outcome.summary.provisioned,
+                issues: outcome.summary.issues,
+            });
+        }));
         router.post(`${base}/run`, (req, res) => {
             const parsed = z
                 .object({})

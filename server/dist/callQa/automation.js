@@ -1,3 +1,4 @@
+import { callDirectionSql } from '../callsDirectory/groups.js';
 import { nanoid } from 'nanoid';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { quotaFor } from '../qaAutomation/quota.js';
@@ -130,6 +131,7 @@ function candidateSourceIds(dependencies) {
        WHERE records.baku_date=?
          AND records.agent_id IS NOT NULL AND records.eligibility_status='eligible'
          AND records.eligibility_decision_version=1 AND records.recording_locator IS NOT NULL
+         AND ${callDirectionSql(dependencies.db, 'records')}
          AND NOT EXISTS(SELECT 1 FROM call_qa_tasks tasks WHERE tasks.source_record_id=records.id)
        ORDER BY
          (SELECT COUNT(*) FROM call_qa_tasks tasks

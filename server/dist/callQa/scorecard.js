@@ -2,9 +2,10 @@ import { AiReviewError, validateAiReview } from '../aiEvaluation/review.js';
 import { readAiReview } from '../aiEvaluation/persistence.js';
 import { nanoid } from 'nanoid';
 import { calculateM10Score } from '../prompts/scorecard.js';
+import { calculateTelesalesScore } from '../prompts/telesalesScorecard.js';
 import { recordAiReview } from '../aiEvaluation/persistence.js';
 import { captureRuntimeInput, requireDatabase, requireIdentifier, requirePositiveVersion, } from './runtimeInput.js';
-import { fail, invalidInput, safeText, validateCallQaCriteria, validateCallQaNotes, } from './scorecardValidation.js';
+import { fail, invalidInput, safeText, validateCallQaCriteria, validateCallQaNotes, validateTelesalesCriteria, } from './scorecardValidation.js';
 import { currentCallRun } from './aiDraft.js';
 export { validateCallQaCriteria, validateCallQaNotes } from './scorecardValidation.js';
 export { generateCallQaAiDraft, getCallQaAiDraft, } from './aiDraft.js';
@@ -92,7 +93,8 @@ function sourceIsCoherent(row) {
 }
 function ownedCompletionRow(db, taskId, reviewerId) {
     return db
-        .prepare(`SELECT tasks.id,tasks.source_record_id,tasks.agent_id,tasks.reviewer_user_id,tasks.status,
+        .prepare(`SELECT tasks.id,tasks.scorecard_kind,tasks.source_record_id,tasks.agent_id,
+              tasks.reviewer_user_id,tasks.status,
               tasks.version,tasks.evaluation_id,sources.agent_id AS source_agent_id,
               sources.call_started_at_utc,sources.call_ended_at_utc,sources.baku_date,
               sources.duration_seconds,sources.caller_last_four,sources.direction,sources.queue_label,
@@ -124,8 +126,12 @@ export function completeCallQaTask(input) {
     const taskId = requireIdentifier(values.taskId, invalidInput);
     const reviewerId = requireIdentifier(values.reviewerUserId, invalidInput);
     const expectedVersion = requirePositiveVersion(values.expectedVersion, invalidInput);
-    const criteria = validateCallQaCriteria(values.criteria);
-    const notes = validateCallQaNotes(values.criteriaNotes);
+    // The checklist belongs to the task; validate the submitted criteria against that checklist.
+    const kind = db.prepare('SELECT scorecard_kind FROM call_qa_tasks WHERE id=?').get(taskId)?.scorecard_kind ?? 'm10';
+    const criteria = kind === 'telesales'
+        ? validateTelesalesCriteria(values.criteria)
+        : validateCallQaCriteria(values.criteria);
+    const notes = validateCallQaNotes(values.criteriaNotes, kind);
     const overallNote = safeText(values.overallNote, 8_000, invalidInput);
     const timestamp = now(values.clock);
     const idFactory = values.createId;
@@ -133,6 +139,8 @@ export function completeCallQaTask(input) {
         const current = ownedCompletionRow(db, taskId, reviewerId);
         if (!current)
             fail('not_found', 404);
+        if ((current.scorecard_kind ?? 'm10') !== kind)
+            fail('completion_conflict');
         const criteriaJson = JSON.stringify(criteria);
         const notesJson = JSON.stringify(notes);
         if (current.status === 'completed') {
@@ -177,7 +185,8 @@ export function completeCallQaTask(input) {
         const queue = current.queue_label === null
             ? null
             : safeText(current.queue_label, 1_000, () => fail('source_ineligible'));
-        const aiFields = currentCallRun(db, taskId, reviewerId);
+        // The AI reviewer only knows the M10 checklist; Telesales reviews are always manual.
+        const aiFields = kind === 'telesales' ? null : currentCallRun(db, taskId, reviewerId);
         const aiReview = validateAiReview(values.aiReview, aiFields);
         const evaluationId = createId(idFactory);
         const metadata = {
@@ -190,8 +199,9 @@ export function completeCallQaTask(input) {
             direction,
             queue,
             task_id: current.id,
+            ...(kind === 'telesales' ? { scorecard: 'telesales' } : {}),
         };
-        const score = calculateM10Score(criteria);
+        const score = kind === 'telesales' ? calculateTelesalesScore(criteria) : calculateM10Score(criteria);
         db.prepare(`INSERT INTO evaluations
         (id,agent_id,upload_id,transcription_id,source_text,score,criteria_json,
          criteria_notes_json,source_metadata_json,source_ref,summary,strengths_json,

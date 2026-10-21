@@ -1,3 +1,4 @@
+import { directoryGroupOf } from '../callsDirectory/groups.js';
 import { nanoid } from 'nanoid';
 import { CallQaServiceError } from './errors.js';
 import { canonicalOptionalUtc, captureRuntimeInput, requireAuditReason, requireDatabase, requireIdentifier, requirePositiveVersion, } from './runtimeInput.js';
@@ -201,8 +202,8 @@ export function assignCallQaTask(input) {
              (id,source_record_id,agent_id,reviewer_user_id,status,assignment_origin,
              assigned_by_user_id,assignment_reason,assignment_explanation,deadline_at_utc,
              version,assigned_at_utc,
-             created_at_utc,updated_at_utc)
-           VALUES (?,?,?,?,'assigned','manual',?,?,?,?,1,?,?,?)`).run(taskId, source.id, source.agent_id, reviewerUserId, actorUserId, reason, explanation, deadlineAtUtc, now, now, now);
+             created_at_utc,updated_at_utc,scorecard_kind)
+           VALUES (?,?,?,?,'assigned','manual',?,?,?,?,1,?,?,?,?)`).run(taskId, source.id, source.agent_id, reviewerUserId, actorUserId, reason, explanation, deadlineAtUtc, now, now, now, directoryGroupOf(db, source.agent_id) === 'telesales' ? 'telesales' : 'm10');
             appendEvent({
                 db,
                 createId,

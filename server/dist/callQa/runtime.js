@@ -7,6 +7,7 @@ import { loadChatSourceConfig } from '../chatQa/sourceConfig.js';
 import { listCallCatalog } from './catalog.js';
 import { createMongoCallSourceAdapter } from './mongoSource.js';
 import { createMysqlCallSourceAdapter } from './mysqlSource.js';
+import { createHttpCallSourceAdapter } from './httpSource.js';
 import { appendCallQaOperationalEvent } from './operationalEvents.js';
 import { createFfprobeRecordingProbe } from './recordingProbe.js';
 import { openAdminCallRecording, openReviewerCallRecording } from './recordingAccess.js';
@@ -31,19 +32,30 @@ function loadState(options) {
     let configuredSource = null;
     if (!normalizationProtection) {
         try {
-            // Chat HTTP transport is independent of the existing call catalog's database source.
-            const chat = loadChatSourceConfig(options.env.CHAT_SOURCE_BACKEND?.trim() === 'http'
-                ? { ...options.env, CHAT_SOURCE_BACKEND: options.env.CALL_SOURCE_BACKEND || 'mysql' }
-                : options.env);
+            // CALL_SOURCE_BACKEND=http reads calls from the Calls search API, like HTTP chats;
+            // otherwise the call catalog keeps its own database source.
+            const callsOverHttp = options.env.CALL_SOURCE_BACKEND?.trim() === 'http';
+            const chat = loadChatSourceConfig(callsOverHttp
+                ? { ...options.env, CHAT_SOURCE_BACKEND: 'http' }
+                : options.env.CHAT_SOURCE_BACKEND?.trim() === 'http'
+                    ? { ...options.env, CHAT_SOURCE_BACKEND: options.env.CALL_SOURCE_BACKEND || 'mysql' }
+                    : options.env);
             if (chat) {
                 normalizationProtection = {
                     externalAgentIdHmacKey: createSecretKey(chat.samplingHmacSecret),
                 };
-                const sourceConfig = callSourceConfigFromChatSource(chat);
-                configuredSource =
-                    chat.backend === 'mysql'
-                        ? createMysqlCallSourceAdapter(sourceConfig)
-                        : createMongoCallSourceAdapter(sourceConfig);
+                if (chat.backend === 'http') {
+                    if (!chat.http)
+                        throw new Error('invalid call source configuration');
+                    configuredSource = createHttpCallSourceAdapter(chat.http, chat.httpCatalog);
+                }
+                else {
+                    const sourceConfig = callSourceConfigFromChatSource(chat);
+                    configuredSource =
+                        chat.backend === 'mysql'
+                            ? createMysqlCallSourceAdapter(sourceConfig)
+                            : createMongoCallSourceAdapter(sourceConfig);
+                }
             }
         }
         catch {

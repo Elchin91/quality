@@ -1,6 +1,7 @@
 import { getAutomationEnabled, readRosterSnapshot, rosterIsFresh } from './repository.js';
 import { monthlyAssignedTaskCounts } from './channelQuota.js';
 import { previousBakuDay } from './reviewWindow.js';
+import { telesalesPeople } from './fixedSchedule.js';
 import { bakuMonth, bakuMonthBounds, cumulativeShiftTarget, MONTHLY_EVALUATION_TARGET, shiftStartMs, shiftEndMs, } from './types.js';
 function clockMs(now) {
     const value = now instanceof Date ? now.getTime() : now;
@@ -144,12 +145,18 @@ export function quotaFor(db, agentId, now, channel) {
     const nowMs = clockMs(now);
     const month = previousBakuDay(nowMs).date.slice(0, 7);
     const snapshot = readRosterSnapshot(db, month);
-    if (!snapshot)
-        return emptyQuota(month, agentId, 'roster_unavailable');
-    const link = rosterLink(db, agentId, month);
-    const person = snapshot.people.find((entry) => entry.key === link?.person_key);
-    if (!person)
-        return emptyQuota(month, agentId, 'not_in_roster');
+    const link = snapshot ? rosterLink(db, agentId, month) : undefined;
+    const person = snapshot?.people.find((entry) => entry.key === link?.person_key);
+    if (!person) {
+        // A person in the uploaded roster keeps that schedule; otherwise Telesales use weekdays.
+        const fixed = telesalesPeople(db, month, nowMs, agentId)[0];
+        if (fixed)
+            return {
+                ...result(db, fixed.person, agentId, 'system', month, nowMs, fixed.fresh, getAutomationEnabled(db), channel),
+                group: 'telesales',
+            };
+        return emptyQuota(month, agentId, snapshot ? 'not_in_roster' : 'roster_unavailable');
+    }
     return result(db, person, agentId, link?.origin ?? null, month, nowMs, rosterIsFresh(snapshot, nowMs), getAutomationEnabled(db), channel);
 }
 /** Read-only preview includes unconfirmed people without exposing their schedule to reviewers. */
@@ -157,8 +164,18 @@ export function listRosterQuota(db, now) {
     const nowMs = clockMs(now);
     const month = previousBakuDay(nowMs).date.slice(0, 7);
     const snapshot = readRosterSnapshot(db, month);
-    if (!snapshot)
-        return [];
+    const enabled = getAutomationEnabled(db);
+    const rostered = snapshot ? snapshotQuota(db, snapshot, month, nowMs, enabled) : [];
+    const linked = new Set(rostered.map((row) => row.agentId).filter(Boolean));
+    const fixed = telesalesPeople(db, month, nowMs)
+        .filter(({ agentId }) => !linked.has(agentId))
+        .map(({ person, agentId, fresh }) => ({
+        ...result(db, person, agentId, 'system', month, nowMs, fresh, enabled),
+        group: 'telesales',
+    }));
+    return [...rostered, ...fixed];
+}
+function snapshotQuota(db, snapshot, month, nowMs, enabled) {
     const manual = db.prepare('SELECT person_key,agent_id FROM qa_roster_links').all();
     const manualAgentIds = new Set(manual.map((link) => link.agent_id));
     const linkedAgent = new Map(manual.map((link) => [link.person_key, { agentId: link.agent_id, origin: 'manual' }]));
@@ -171,7 +188,6 @@ export function listRosterQuota(db, now) {
         }
     }
     const fresh = rosterIsFresh(snapshot, nowMs);
-    const enabled = getAutomationEnabled(db);
     return snapshot.people.map((person) => {
         const link = linkedAgent.get(person.key);
         return result(db, person, link?.agentId ?? null, link?.origin ?? null, month, nowMs, fresh, enabled);

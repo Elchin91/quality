@@ -352,6 +352,7 @@ export function reviewerTaskDto(value) {
             queue_label: talk.queueLabel,
         },
         recording_available: task.recordingAvailable,
+        scorecard_kind: task.scorecardKind === 'telesales' ? 'telesales' : 'm10',
     };
 }
 export function pageDto(value, itemDto) {

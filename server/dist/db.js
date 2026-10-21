@@ -16,6 +16,7 @@ import { createQaPolicySchema } from './qaPolicies/schema.js';
 import { createM10ImportSchema } from './importM10/schema.js';
 import { createConfluenceIndexSchema } from './confluenceIndexSchema.js';
 import { createQaAutomationSchema } from './qaAutomation/schema.js';
+import { createCallsDirectorySchema } from './callsDirectory/schema.js';
 import { createTeamSchema } from './team/schema.js';
 import { seedHistoricalTeamMemberships } from './team/history.js';
 import { rebaseHistoricalUploadPaths } from './portableUploads.js';
@@ -271,6 +272,7 @@ db.exec(`
 `);
 createCallQaSchema(db);
 createQaAutomationSchema(db);
+createCallsDirectorySchema(db);
 createAiEvaluationSchema(db);
 enforceOneTranscriptionPerUpload(db);
 enforceOneUserPerAgent(db);

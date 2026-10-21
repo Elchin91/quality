@@ -1,3 +1,4 @@
+import { directoryGroupOf, expectedCallDirection } from '../callsDirectory/groups.js';
 import { nanoid } from 'nanoid';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { operatorChannelCapacity, operatorMonthlyCapacity, quotaFor, } from '../qaAutomation/quota.js';
@@ -37,7 +38,8 @@ function eligibleSource(db, id) {
     const source = db
         .prepare(`SELECT id,external_agent_id,agent_id,call_started_at_utc,call_ended_at_utc,baku_date,
               duration_seconds,eligibility_status,eligibility_reason,eligibility_decision_version,
-              recording_status,recording_storage_key,recording_mime_type,recording_size_bytes
+              recording_status,recording_storage_key,recording_mime_type,recording_size_bytes,
+              direction
          FROM call_source_records WHERE id=?`)
         .get(id);
     if (!source)
@@ -55,7 +57,9 @@ function eligibleSource(db, id) {
     if (source.eligibility_status !== 'eligible' ||
         source.eligibility_reason !== null ||
         source.eligibility_decision_version !== 1 ||
-        !canonical)
+        !canonical ||
+        (source.agent_id !== null &&
+            (source.direction ?? 'in') !== expectedCallDirection(db, source.agent_id)))
         return fail('source_ineligible');
     if (!source.agent_id ||
         !source.external_agent_id ||
@@ -168,8 +172,8 @@ export function assignAutomaticCallQaTask(input) {
             db.prepare(`INSERT INTO call_qa_tasks
            (id,source_record_id,agent_id,reviewer_user_id,status,assignment_origin,
             assigned_by_user_id,assignment_reason,assignment_explanation,deadline_at_utc,
-            version,assigned_at_utc,created_at_utc,updated_at_utc)
-         VALUES (?,?,?,?,'assigned','automatic',NULL,?,?,NULL,1,?,?,?)`).run(taskId, source.id, source.agent_id, reviewer.userId, reason, explanation, now.iso, now.iso, now.iso);
+            version,assigned_at_utc,created_at_utc,updated_at_utc,scorecard_kind)
+         VALUES (?,?,?,?,'assigned','automatic',NULL,?,?,NULL,1,?,?,?,?)`).run(taskId, source.id, source.agent_id, reviewer.userId, reason, explanation, now.iso, now.iso, now.iso, directoryGroupOf(db, source.agent_id) === 'telesales' ? 'telesales' : 'm10');
             withCallQaSystemAuthorization(db, () => db
                 .prepare(`INSERT INTO call_qa_events
              (id,task_id,source_record_id,actor_user_id,actor_role,event_type,from_status,to_status,

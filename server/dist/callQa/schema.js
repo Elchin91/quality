@@ -336,5 +336,10 @@ export function createCallQaSchema(db) {
       SELECT RAISE(ABORT, 'call qa events are append-only');
     END;
   `);
+    // Telesales tasks are scored on their own checklist; existing tasks stay on the M10 one.
+    const taskColumns = db.prepare('PRAGMA table_info(call_qa_tasks)').all();
+    if (!taskColumns.some(({ name }) => name === 'scorecard_kind')) {
+        db.exec("ALTER TABLE call_qa_tasks ADD COLUMN scorecard_kind TEXT NOT NULL DEFAULT 'm10' CHECK(scorecard_kind IN ('m10','telesales'))");
+    }
     createCallQaScorecardGuards(db, evaluationSchemaReady);
 }
