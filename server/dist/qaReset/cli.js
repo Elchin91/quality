@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { registerCallQaValidationFunctions } from '../callQa/schema.js';
+import { registerCallQaRuntimeFunctions } from '../callQa/schema.js';
 import { applyQaReset, planQaReset } from './reset.js';
 const usage = 'node server/dist/qaReset/cli.js --db <data.db> (--dry-run|--apply) [--actor <admin email>]';
 function argumentsFor(argv) {
@@ -32,7 +32,7 @@ async function backupDatabase(db, dbPath) {
     fs.chmodSync(target, 0o600);
     const backup = new Database(target, { readonly: true, fileMustExist: true });
     try {
-        registerCallQaValidationFunctions(backup);
+        registerCallQaRuntimeFunctions(backup);
         if (backup.pragma('integrity_check', { simple: true }) !== 'ok')
             throw new Error('backup verification failed; reset not applied');
     }
@@ -41,17 +41,17 @@ async function backupDatabase(db, dbPath) {
     }
     return target;
 }
-function actorId(db, email) {
+/** Audit triggers accept only an active admin who has already replaced the temporary password. */
+function actorFor(db, email) {
+    const ready = "role='admin' AND active=1 AND must_change_password=0";
     const row = (email
-        ? db
-            .prepare("SELECT id FROM users WHERE lower(email)=? AND role='admin' AND active=1")
-            .get(email)
+        ? db.prepare(`SELECT id,name,email FROM users WHERE lower(email)=? AND ${ready}`).get(email)
         : db
-            .prepare("SELECT id FROM users WHERE role='admin' AND active=1 ORDER BY created_at LIMIT 1")
+            .prepare(`SELECT id,name,email FROM users WHERE ${ready} ORDER BY created_at LIMIT 1`)
             .get());
     if (!row)
-        throw new Error('no active admin found for --actor');
-    return row.id;
+        throw new Error('no active admin with a changed password found for --actor');
+    return { id: row.id, label: `${row.name} <${row.email}>` };
 }
 /** Cancels all open chat/call QA tasks; completed evaluations and imported history stay. */
 export async function runQaResetCli(argv, nowMs = Date.now()) {
@@ -61,16 +61,23 @@ export async function runQaResetCli(argv, nowMs = Date.now()) {
         fileMustExist: true,
     });
     try {
-        registerCallQaValidationFunctions(db);
+        registerCallQaRuntimeFunctions(db);
         db.pragma('busy_timeout = 5000');
         db.pragma('foreign_keys = ON');
         const before = planQaReset(db);
+        const actor = actorFor(db, options.actor);
         if (options.mode === 'dry-run')
-            return { mode: options.mode, ...before };
-        const actor = actorId(db, options.actor);
+            return { mode: options.mode, actor: actor.label, ...before };
         const backupPath = await backupDatabase(db, options.dbPath);
-        const applied = applyQaReset(db, actor, nowMs);
-        return { mode: options.mode, before, ...applied, after: planQaReset(db), backupPath };
+        const applied = applyQaReset(db, actor.id, nowMs);
+        return {
+            mode: options.mode,
+            actor: actor.label,
+            before,
+            ...applied,
+            after: planQaReset(db),
+            backupPath,
+        };
     }
     finally {
         db.close();

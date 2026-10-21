@@ -11,12 +11,15 @@ export function withCallQaCompletionAuthorization(db, work) {
         completionAuthorization.delete(db);
     }
 }
+export function registerCallQaCompletionAuthorization(db) {
+    if (registeredDatabases.has(db))
+        return;
+    db.function('call_qa_completion_authorized', () => Number(completionAuthorization.has(db)));
+    registeredDatabases.add(db);
+}
 /** Install DB guards that make a completion event the only coherent task-link transition. */
 export function createCallQaScorecardGuards(db, evaluationSchemaReady) {
-    if (!registeredDatabases.has(db)) {
-        db.function('call_qa_completion_authorized', () => Number(completionAuthorization.has(db)));
-        registeredDatabases.add(db);
-    }
+    registerCallQaCompletionAuthorization(db);
     const completedEventType = evaluationSchemaReady ? ",'completed'" : '';
     const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((column) => column.name));
     const actorSchemaReady = ['id', 'role', 'active', 'must_change_password'].every((column) => userColumns.has(column));

@@ -39,7 +39,7 @@ function validReadyUpload(uploadId, filename, storagePath, mimeType, sizeBytes) 
         path.basename(storagePath) === expectedFilename &&
         path.basename(path.dirname(storagePath)) === 'call-recordings');
 }
-function registerAccessValidation(db) {
+export function registerAccessValidation(db) {
     if (validationDatabases.has(db))
         return;
     db.function('call_qa_valid_access_id', { deterministic: true }, validAccessId);

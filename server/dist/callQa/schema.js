@@ -1,7 +1,7 @@
-import { createRecordingAccessGuards, migrateRecordingAccessTable, migrateRecordingUploadFilenames, recordingAccessTableSql, } from './recordingAccessSchema.js';
+import { createRecordingAccessGuards, migrateRecordingAccessTable, migrateRecordingUploadFilenames, recordingAccessTableSql, registerAccessValidation, } from './recordingAccessSchema.js';
 import { callSourceRecordsTableSql, migrateCallSourceEligibilityDefaults, registerEligibilityValidation, } from './eligibilitySchema.js';
-import { createCallQaScorecardGuards } from './completionSchema.js';
-import { migrateCallQaSystemEvents } from './automaticSchema.js';
+import { createCallQaScorecardGuards, registerCallQaCompletionAuthorization, } from './completionSchema.js';
+import { migrateCallQaSystemEvents, registerCallQaSystemAuthorization } from './automaticSchema.js';
 import { ensureCallQaEvaluationForeignKey, hasFullEvaluationSchema } from './evaluationSchema.js';
 import { allowCallReassignmentAfterCancel } from './reassignSchema.js';
 import { normalizeCallInterval } from './time.js';
@@ -29,6 +29,16 @@ export function registerCallQaValidationFunctions(db) {
     db.function('call_qa_valid_interval', { deterministic: true }, isValidPersistedCallInterval);
     registerEligibilityValidation(db);
     validationFunctionDatabases.add(db);
+}
+/**
+ * Every SQL function the call QA triggers reference. The server gets them while creating
+ * the schema; standalone tools that open an existing database must register them first.
+ */
+export function registerCallQaRuntimeFunctions(db) {
+    registerCallQaValidationFunctions(db);
+    registerCallQaSystemAuthorization(db);
+    registerCallQaCompletionAuthorization(db);
+    registerAccessValidation(db);
 }
 function addColumnIfMissing(db, table, column, definition) {
     const columns = db.prepare(`PRAGMA table_info(${table})`).all();
