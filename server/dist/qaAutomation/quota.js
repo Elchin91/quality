@@ -1,5 +1,5 @@
 import { getAutomationEnabled, readRosterSnapshot, rosterIsFresh } from './repository.js';
-import { monthlyAssignedTaskCounts } from './channelQuota.js';
+import { monthlyAssignedTaskCounts, reviewDayAssignedCount } from './channelQuota.js';
 import { previousBakuDay } from './reviewWindow.js';
 import { telesalesPeople } from './fixedSchedule.js';
 import { bakuMonth, bakuMonthBounds, cumulativeShiftTarget, MONTHLY_EVALUATION_TARGET, shiftStartMs, shiftEndMs, } from './types.js';
@@ -73,9 +73,13 @@ function result(db, person, agentId, linkOrigin, month, nowMs, fresh, enabled, r
     const { completed, open, used } = agentId
         ? counts(db, agentId, month)
         : { completed: 0, open: 0, used: 0 };
+    // One previous working day yields at most its share of the month (1 per day on a full
+    // schedule), so a mid-month start or a reset never piles a backlog onto one agent.
+    const dailyLimit = shifts.length ? Math.ceil(MONTHLY_EVALUATION_TARGET / shifts.length) : 0;
+    const reviewDayUsed = agentId ? reviewDayAssignedCount(db, agentId, reviewDay) : 0;
     const totalRemaining = hasUnknownShift || !workedPreviousDay
         ? 0
-        : Math.max(0, Math.min(MONTHLY_EVALUATION_TARGET, due) - used);
+        : Math.max(0, Math.min(Math.min(MONTHLY_EVALUATION_TARGET, due) - used, dailyLimit - reviewDayUsed));
     const remaining = totalRemaining;
     let reason;
     if (!fresh || !carryFresh)

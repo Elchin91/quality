@@ -1,4 +1,5 @@
 import { randomInt } from 'node:crypto';
+import { bakuMonth, bakuMonthBounds } from '../qaAutomation/types.js';
 function positiveCapacity(value) {
     if (!Number.isSafeInteger(value) || value < 1 || value > 1_000) {
         throw new RangeError('capacity must be an integer between 1 and 1000');
@@ -114,6 +115,36 @@ function openWorkloads(db, reviewerUserIds) {
     }
     return result;
 }
+/** Tasks given to each reviewer in the current Baku month (any state but cancelled). */
+function monthlyAssignments(db, reviewerUserIds, nowMs) {
+    const result = new Map(reviewerUserIds.map((id) => [id, 0]));
+    if (!reviewerUserIds.length)
+        return result;
+    const bounds = bakuMonthBounds(bakuMonth(nowMs));
+    const placeholders = reviewerUserIds.map(() => '?').join(',');
+    for (const [table, column, start, end] of [
+        ['chat_qa_tasks', 'created_at', bounds.start, bounds.end],
+        [
+            'call_qa_tasks',
+            'created_at_utc',
+            new Date(bounds.start).toISOString(),
+            new Date(bounds.end).toISOString(),
+        ],
+    ]) {
+        if (!tableExists(db, table))
+            continue;
+        const timed = db.prepare(`PRAGMA table_info(${table})`).all().some(({ name }) => name === column);
+        const rows = db
+            .prepare(`SELECT reviewer_user_id,COUNT(*) count FROM ${table}
+         WHERE reviewer_user_id IN (${placeholders}) AND status<>'cancelled'
+           ${timed ? `AND ${column}>=? AND ${column}<?` : ''}
+         GROUP BY reviewer_user_id`)
+            .all(...reviewerUserIds, ...(timed ? [start, end] : []));
+        for (const row of rows)
+            result.set(row.reviewer_user_id, (result.get(row.reviewer_user_id) ?? 0) + row.count);
+    }
+    return result;
+}
 function readinessReason(row, available) {
     if (row.role !== 'reviewer')
         return 'role';
@@ -187,8 +218,13 @@ export function selectReviewerAndAdvance(db, input) {
     const ready = listReviewerReadiness(db, input.defaultCapacity).filter((row) => row.ready);
     if (!ready.length)
         throw new Error('reviewer_unavailable');
-    const minimum = Math.min(...ready.map((row) => row.openWorkload));
-    const tied = ready
+    // Equal shares over the month first, so a reviewer who finishes quickly is not flooded;
+    // the open queue only breaks ties.
+    const month = monthlyAssignments(db, ready.map(({ userId }) => userId), input.now);
+    const fewest = Math.min(...ready.map((row) => month.get(row.userId) ?? 0));
+    const balanced = ready.filter((row) => (month.get(row.userId) ?? 0) === fewest);
+    const minimum = Math.min(...balanced.map((row) => row.openWorkload));
+    const tied = balanced
         .filter((row) => row.openWorkload === minimum)
         .sort((a, b) => a.userId.localeCompare(b.userId));
     db.prepare(`INSERT OR IGNORE INTO reviewer_assignment_cursor
@@ -203,7 +239,7 @@ export function selectReviewerAndAdvance(db, input) {
 }
 export function assignmentExplanation(origin, reviewer) {
     const prefix = origin === 'automatic'
-        ? 'Automatic random selection among least-loaded reviewers'
+        ? 'Automatic random selection among reviewers with the fewest tasks this month'
         : 'Explicit administrator assignment';
     return `${prefix}; reviewer workload ${reviewer.openWorkload} open Chat and Call QA tasks.`;
 }

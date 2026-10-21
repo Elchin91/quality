@@ -66,3 +66,35 @@ export function monthlyAssignedTaskCounts(db, agentId, month, channel) {
         total: row.total + historical,
     };
 }
+/**
+ * Tasks reserved for contacts of one Baku review day (both channels). Rows without source
+ * metadata fall back to the assignment day, which follows the review day.
+ */
+export function reviewDayAssignedCount(db, agentId, day) {
+    let total = 0;
+    for (const channel of ['chat', 'call']) {
+        const table = channel === 'chat' ? 'chat_qa_tasks' : 'call_qa_tasks';
+        const taskFields = columns(db, table);
+        if (!taskFields.size)
+            continue;
+        const sourceTable = channel === 'chat' ? 'source_interactions' : 'call_source_records';
+        const sourceId = channel === 'chat' ? 'interaction_id' : 'source_record_id';
+        const joinSource = taskFields.has(sourceId) && columns(db, sourceTable).has('baku_date');
+        const timestamp = channel === 'chat' ? 'created_at' : 'created_at_utc';
+        const assignedStart = day.end;
+        const assignedEnd = day.end + 86_400_000;
+        const bounds = channel === 'chat'
+            ? [assignedStart, assignedEnd]
+            : [new Date(assignedStart).toISOString(), new Date(assignedEnd).toISOString()];
+        const onDay = joinSource
+            ? `CASE WHEN s.baku_date IS NOT NULL THEN s.baku_date=?
+         ELSE t.${timestamp}>=? AND t.${timestamp}<? END`
+            : `t.${timestamp}>=? AND t.${timestamp}<?`;
+        total += db
+            .prepare(`SELECT COUNT(*) count FROM ${table} t
+           ${joinSource ? `LEFT JOIN ${sourceTable} s ON s.id=t.${sourceId}` : ''}
+           WHERE t.agent_id=? AND t.status<>'cancelled' AND (${onDay})`)
+            .get(...(joinSource ? [agentId, day.date, ...bounds] : [agentId, ...bounds])).count;
+    }
+    return total;
+}
