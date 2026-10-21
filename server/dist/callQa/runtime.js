@@ -13,6 +13,8 @@ import { createFfprobeRecordingProbe } from './recordingProbe.js';
 import { openAdminCallRecording, openReviewerCallRecording } from './recordingAccess.js';
 import { CallsRecordingClient } from './recordingClient.js';
 import { loadRecordingConfig } from './recordingConfig.js';
+import { CallsChatHttpTransport } from '../chatQa/httpTransport.js';
+import { httpContactContextFetcher, } from '../contactContext/context.js';
 import { createCallQaReadiness } from './readiness.js';
 import { CallRecordingStore } from './recordingStore.js';
 import { CallRecordingCache, recordingCacheSettings } from './recordingCache.js';
@@ -197,6 +199,15 @@ export function createCallQaRuntime(options) {
         timeoutMs: Math.min(state.recordingConfig?.timeoutMs ?? 5_000, 10_000),
     });
     const status = readiness.status;
+    let contactContext;
+    try {
+        contactContext = state.recordingConfig
+            ? httpContactContextFetcher(new CallsChatHttpTransport(state.recordingConfig))
+            : undefined;
+    }
+    catch {
+        contactContext = undefined;
+    }
     const automation = createCallQaAutomation({
         db: options.db,
         source,
@@ -204,6 +215,7 @@ export function createCallQaRuntime(options) {
         recordingClient,
         recordingStore,
         prepareRecording: cache ? (id, signal) => cache.prepare(id, signal) : undefined,
+        contactContext,
     });
     const admin = {
         health: async ({ actorUserId }) => {

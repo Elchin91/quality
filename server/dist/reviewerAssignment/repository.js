@@ -1,5 +1,37 @@
 import { randomInt } from 'node:crypto';
 import { bakuMonth, bakuMonthBounds } from '../qaAutomation/types.js';
+/** Which agents' work a reviewer receives automatically. */
+export const REVIEWER_GROUPS = ['customer_support', 'telesales'];
+const DEFAULT_GROUPS = ['customer_support'];
+function parseGroups(value) {
+    if (!value)
+        return [...DEFAULT_GROUPS];
+    try {
+        const parsed = JSON.parse(value);
+        const groups = Array.isArray(parsed)
+            ? REVIEWER_GROUPS.filter((group) => parsed.includes(group))
+            : [];
+        return groups.length ? groups : [...DEFAULT_GROUPS];
+    }
+    catch {
+        return [...DEFAULT_GROUPS];
+    }
+}
+function hasGroupsColumn(db) {
+    try {
+        return db.prepare("PRAGMA table_info('reviewer_assignment_profiles')").all().some(({ name }) => name === 'task_groups');
+    }
+    catch {
+        return false;
+    }
+}
+/** Profiles created before reviewer groups existed serve Customer Support. */
+function ensureGroupsColumn(db) {
+    if (!hasGroupsColumn(db))
+        db.exec(`ALTER TABLE reviewer_assignment_profiles ADD COLUMN task_groups TEXT NOT NULL
+        DEFAULT '["customer_support"]' CHECK(json_valid(task_groups))`);
+}
+const groupsColumn = (db) => hasGroupsColumn(db) ? 'profiles.task_groups' : 'NULL';
 function positiveCapacity(value) {
     if (!Number.isSafeInteger(value) || value < 1 || value > 1_000) {
         throw new RangeError('capacity must be an integer between 1 and 1000');
@@ -63,6 +95,7 @@ export function createReviewerAssignmentSchema(db) {
     else if (tableExists(db, 'users')) {
         migrateProfilesTable(db);
     }
+    ensureGroupsColumn(db);
     db.exec(`
     CREATE TABLE IF NOT EXISTS reviewer_assignment_cursor (
       scope TEXT PRIMARY KEY CHECK(scope='qa'),
@@ -76,6 +109,11 @@ export function createReviewerAssignmentSchema(db) {
     }
 }
 export function updateReviewerProfile(db, input) {
+    const groups = input.groups
+        ? REVIEWER_GROUPS.filter((group) => input.groups.includes(group))
+        : null;
+    if (groups && !groups.length)
+        throw new RangeError('a reviewer needs at least one group');
     if (!Number.isSafeInteger(input.now) || input.now < 0)
         throw new RangeError('invalid audit time');
     if (input.capacityOverride !== null)
@@ -96,6 +134,10 @@ export function updateReviewerProfile(db, input) {
        capacity_override=excluded.capacity_override,
        updated_at=excluded.updated_at,
        updated_by_user_id=excluded.updated_by_user_id`).run(input.reviewerUserId, input.available ? 1 : 0, input.capacityOverride, input.now, input.now, input.actorUserId);
+    if (groups) {
+        ensureGroupsColumn(db);
+        db.prepare('UPDATE reviewer_assignment_profiles SET task_groups=? WHERE reviewer_user_id=?').run(JSON.stringify(groups), input.reviewerUserId);
+    }
 }
 function openWorkloads(db, reviewerUserIds) {
     const result = new Map(reviewerUserIds.map((id) => [id, 0]));
@@ -164,7 +206,7 @@ function rowsFor(db, reviewerUserIds) {
         : "users.role='reviewer'";
     return db
         .prepare(`SELECT users.id,users.role,users.active,users.must_change_password,
-              profiles.available,profiles.capacity_override,
+              profiles.available,profiles.capacity_override,${groupsColumn(db)} task_groups,
               profiles.created_at profile_created_at,
               profiles.updated_at profile_updated_at,
               profiles.updated_by_user_id profile_updated_by_user_id
@@ -186,6 +228,7 @@ function readinessFromRow(row, open) {
         capacityOverride: row.capacity_override,
         effectiveCapacity: null,
         openWorkload: open,
+        groups: parseGroups(row.task_groups),
         ready: reason === null,
         reason,
         profileCreatedAt: row.profile_created_at,
@@ -215,7 +258,8 @@ export function selectReviewerAndAdvance(db, input) {
         throw new Error('reviewer cursor requires an active transaction');
     if (!Number.isSafeInteger(input.now) || input.now < 0)
         throw new RangeError('invalid cursor time');
-    const ready = listReviewerReadiness(db, input.defaultCapacity).filter((row) => row.ready);
+    const group = input.group ?? 'customer_support';
+    const ready = listReviewerReadiness(db, input.defaultCapacity).filter((row) => row.ready && row.groups.includes(group));
     if (!ready.length)
         throw new Error('reviewer_unavailable');
     // Equal shares over the month first, so a reviewer who finishes quickly is not flooded;

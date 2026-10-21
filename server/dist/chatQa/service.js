@@ -1,4 +1,5 @@
 import { AiReviewError, validateAiReview } from '../aiEvaluation/review.js';
+import { captureContactContext } from '../contactContext/context.js';
 import { recordAiReview } from '../aiEvaluation/persistence.js';
 import { calculateM10Score } from '../prompts/scorecard.js';
 import { operatorChannelCapacity, operatorMonthlyCapacity, quotaFor, } from '../qaAutomation/quota.js';
@@ -42,6 +43,12 @@ async function createTask(input) {
         fail('source_unavailable');
     }
     const now = nowFrom(input.clock);
+    await captureContactContext(input.db, input.source.contactContext, {
+        channel: 'chat',
+        sourceId: initial.id,
+        requestIds: evidence.requestIds,
+        nowMs: now.getTime(),
+    }, input.signal);
     if (input.signal?.aborted)
         fail('task_state_conflict');
     try {

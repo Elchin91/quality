@@ -1,7 +1,7 @@
 import { AiReviewError } from '../aiEvaluation/review.js';
 import { z } from 'zod';
 import { ChatQaServiceError } from './service.js';
-import { assertDisplayEvidenceBudget, sanitizeSensitiveEvidence } from './evidenceSecurity.js';
+import { assertDisplayEvidenceBudget } from './evidenceSecurity.js';
 export const idSchema = z
     .string()
     .trim()
@@ -161,11 +161,9 @@ export function safeTranscript(value) {
                     (source.extension !== null && typeof source.extension !== 'string') ||
                     (source.caption !== null && typeof source.caption !== 'string'))
                     throw new Error('invalid');
-                const displayName = typeof source.display_name === 'string'
-                    ? sanitizeSensitiveEvidence(source.display_name)
-                    : null;
+                const displayName = typeof source.display_name === 'string' ? source.display_name : null;
                 const extension = typeof source.extension === 'string' ? source.extension : null;
-                const caption = typeof source.caption === 'string' ? sanitizeSensitiveEvidence(source.caption) : null;
+                const caption = typeof source.caption === 'string' ? source.caption : null;
                 if ((displayName !== null && (displayName.length > 255 || /[/\\]/u.test(displayName))) ||
                     (extension !== null && !/^[a-z0-9]{1,16}$/u.test(extension)))
                     throw new Error('invalid');
@@ -187,13 +185,9 @@ export function safeTranscript(value) {
                 ...(attachment ? { attachment } : {}),
             };
         });
+        // Reviewers see the customer's messages as written; nothing is masked.
         assertDisplayEvidenceBudget(transcript);
-        const sanitized = transcript.map((entry) => ({
-            ...entry,
-            text: sanitizeSensitiveEvidence(entry.text),
-        }));
-        assertDisplayEvidenceBudget(sanitized);
-        return sanitized;
+        return transcript;
     }
     catch {
         return null;

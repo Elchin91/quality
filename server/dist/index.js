@@ -44,6 +44,7 @@ import { createChatQaAdminRouter } from './routes/chat-qa-admin.js';
 import { createChatQaReviewerRouter } from './routes/chat-qa-reviewer.js';
 import { createEvaluationAttachmentRouter } from './routes/evaluation-attachments.js';
 import { createReviewerDashboardRouter } from './routes/reviewer-dashboard.js';
+import { createContactContextRouter } from './routes/contact-context.js';
 import { createCallQaAdminRouter } from './routes/call-qa-admin.js';
 import { createCallQaReviewerRouter } from './routes/call-qa-reviewer.js';
 import { requireAdmin, requireAuth, requirePasswordChangeComplete, requireRole } from './auth.js';
@@ -213,6 +214,7 @@ app.use('/api', createEventsRouter(db));
 app.use('/api', createQaPoliciesRouter(db));
 app.use('/api', createQaAutomationRouter(db, { directory: callsDirectory }));
 app.use('/api', createReviewerDashboardRouter({ db }));
+app.use('/api', createContactContextRouter({ db }));
 // Agent-scoped portal.
 app.use('/api', meRouter);
 app.use('/api', createHistoricalEvaluationRouter(db));

@@ -5,6 +5,7 @@ import { quotaFor } from '../qaAutomation/quota.js';
 import { assignAutomaticCallQaTask } from './automaticAssignment.js';
 import { CallQaServiceError } from './errors.js';
 import { appendCallQaOperationalEvent } from './operationalEvents.js';
+import { captureContactContext } from '../contactContext/context.js';
 import { syncCallCatalog } from './sync.js';
 const MAX_ASSIGNMENTS_PER_CYCLE = 32;
 const MAX_CANDIDATES_PER_CYCLE = 500;
@@ -31,7 +32,7 @@ export async function prepareSelectedCallRecording(dependencies, input) {
         input.signal.aborted)
         throw new CallQaServiceError('invalid_input', 400);
     const row = dependencies.db
-        .prepare('SELECT recording_locator FROM call_source_records WHERE id=?')
+        .prepare('SELECT recording_locator,source_ref FROM call_source_records WHERE id=?')
         .get(input.sourceRecordId);
     if (!row)
         throw new CallQaServiceError('not_found', 404);
@@ -58,6 +59,14 @@ export async function prepareSelectedCallRecording(dependencies, input) {
             idempotencyKey,
             now: nowFrom(dependencies.clock).toISOString(),
         });
+        await captureContactContext(dependencies.db, dependencies.contactContext, {
+            channel: 'call',
+            sourceId: input.sourceRecordId,
+            requestIds: row.source_ref.startsWith('calls-request:')
+                ? [row.source_ref.slice('calls-request:'.length)]
+                : [],
+            nowMs: nowFrom(dependencies.clock).getTime(),
+        }, input.signal);
         return stored;
     }
     catch (error) {

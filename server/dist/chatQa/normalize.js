@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { assertDisplayEvidenceBudget, assertSourceEvidenceBudget, sanitizeSensitiveEvidence, } from './evidenceSecurity.js';
+import { assertDisplayEvidenceBudget, assertSourceEvidenceBudget, } from './evidenceSecurity.js';
 const ACTIVE_REQUEST_STATUSES = new Set(['ACTIVE', 'WAITING', 'IN_PROGRESS', 'OPEN']);
 const IMAGE_EXTENSIONS = new Set([
     'avif',
@@ -57,7 +57,7 @@ function attachmentDisplayName(message) {
     const fileName = value(message.fileName);
     if (!fileName || fileName.length > 255 || /[/\\]/u.test(fileName))
         return null;
-    return sanitizeSensitiveEvidence(fileName);
+    return fileName;
 }
 function attachmentLocator(message, category) {
     const fileName = value(message.fileName);
@@ -78,7 +78,7 @@ function attachmentEvidence(message, category) {
         category,
         display_name: attachmentDisplayName(message),
         extension: attachmentExtension(message),
-        caption: caption ? sanitizeSensitiveEvidence(caption) : null,
+        caption: caption ?? null,
         availability: 'metadata_only',
     };
 }
@@ -199,7 +199,7 @@ export function normalizeConversation(source, aggregateCounts) {
             messages.push({
                 role,
                 kind: 'text',
-                text: sanitizeSensitiveEvidence(text),
+                text,
                 edited: message.isEdited === true,
                 created_at: createdAt,
             });
@@ -275,7 +275,7 @@ export function legacyConversationContentHash(source) {
             messages.push({
                 role,
                 kind: 'text',
-                text: sanitizeSensitiveEvidence(text),
+                text,
                 edited: message.isEdited === true,
             });
             continue;
@@ -296,7 +296,7 @@ export function legacyConversationContentHash(source) {
         messages.push({
             role,
             kind: 'attachment',
-            text: sanitizeSensitiveEvidence(caption ? `${marker} ${caption}` : marker),
+            text: caption ? `${marker} ${caption}` : marker,
             edited: message.isEdited === true,
         });
     }

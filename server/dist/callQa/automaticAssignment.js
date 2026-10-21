@@ -161,6 +161,9 @@ export function assignAutomaticCallQaTask(input) {
                     defaultCapacity: configuredDefaultCapacity(db),
                     now: now.ms,
                     randomIndex,
+                    group: directoryGroupOf(db, source.agent_id) === 'telesales'
+                        ? 'telesales'
+                        : 'customer_support',
                 });
             }
             catch {

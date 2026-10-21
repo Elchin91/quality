@@ -5,7 +5,7 @@ import { db } from '../db.js';
 import { ALLOWED_DOMAIN, hashPassword, isAllowedEmail, normalizeEmail, requireAdmin, requireAuth, } from '../auth.js';
 import { asyncHandler } from '../asyncHandler.js';
 import { enqueueReviewerRefill } from '../jobs/qaRefill.js';
-import { configuredDefaultCapacity, reviewerReadiness, reviewerReadinessMap, updateReviewerProfile, } from '../reviewerAssignment/repository.js';
+import { configuredDefaultCapacity, reviewerReadiness, reviewerReadinessMap, updateReviewerProfile, REVIEWER_GROUPS, } from '../reviewerAssignment/repository.js';
 export const adminUsersRouter = Router();
 const AGENT_ALREADY_LINKED = 'agent profile already linked to another user';
 function isAgentLinkConstraint(error) {
@@ -31,6 +31,7 @@ adminUsersRouter.get('/admin/users', requireAuth, requireAdmin, (_req, res) => {
             reviewer_capacity_override: assignment?.capacityOverride ?? null,
             reviewer_effective_capacity: assignment?.effectiveCapacity ?? null,
             reviewer_open_workload: assignment?.openWorkload ?? null,
+            reviewer_groups: assignment?.groups ?? null,
             reviewer_ready: assignment?.ready ?? null,
             reviewer_readiness_reason: assignment?.reason ?? null,
             reviewer_profile_created_at: assignment?.profileCreatedAt ?? null,
@@ -129,6 +130,7 @@ const patchSchema = z
     })
         .optional(),
     reviewer_available: z.boolean().optional(),
+    reviewer_groups: z.array(z.enum(REVIEWER_GROUPS)).min(1).max(REVIEWER_GROUPS.length).optional(),
 })
     .strict()
     .refine((value) => Object.keys(value).length > 0, { message: 'empty patch' });
@@ -169,7 +171,7 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
     if (resultingRole === 'agent' && !resultingAgentId) {
         return res.status(400).json({ error: 'agent role requires a linked agent profile' });
     }
-    const updatesReviewerProfile = parsed.data.reviewer_available !== undefined;
+    const updatesReviewerProfile = parsed.data.reviewer_available !== undefined || parsed.data.reviewer_groups !== undefined;
     if (updatesReviewerProfile && resultingRole !== 'reviewer') {
         return res.status(400).json({ error: 'reviewer assignment profile requires reviewer role' });
     }
@@ -227,6 +229,7 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
                     reviewerUserId: req.params.id,
                     available: parsed.data.reviewer_available ?? current.available,
                     capacityOverride: current.capacityOverride,
+                    groups: parsed.data.reviewer_groups,
                     actorUserId: req.user.id,
                     now: Date.now(),
                 });

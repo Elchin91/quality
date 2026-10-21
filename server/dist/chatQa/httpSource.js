@@ -11,6 +11,7 @@ import { isApprovedChatCatalogSeed } from './sourcePolicy.js';
 import { assertSourceEvidenceBudget } from './evidenceSecurity.js';
 import { mapWithConcurrency } from './boundedPool.js';
 import { CallsSearchPager, pageIds } from './callsSearch.js';
+import { httpContactContextFetcher, } from '../contactContext/context.js';
 const DEFAULT_OPTIONS = { pageSize: 50, concurrency: 4 };
 // A few malformed records are quarantined; a changed upstream contract still fails closed.
 const MIN_ANOMALY_BUDGET = 5;
@@ -31,7 +32,9 @@ export class HttpChatSourceClient {
             deps.transport ??
                 new CallsChatHttpTransport(config, { concurrency: this.options.concurrency });
         this.pager = new CallsSearchPager(this.transport, this.options);
+        this.contactContext = httpContactContextFetcher(this.transport);
     }
+    contactContext;
     search(window, number, dateField = 'completeDate', signal) {
         return this.pager.search(window, number, dateField, signal);
     }

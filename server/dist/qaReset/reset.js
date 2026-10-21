@@ -41,6 +41,7 @@ export function planQaReset(db) {
             reviewer: names.get(reviewer.userId) ?? reviewer.userId,
             receivesNewTasks: reviewer.ready,
             reason: reviewer.reason,
+            groups: reviewer.groups,
         })),
     };
 }
