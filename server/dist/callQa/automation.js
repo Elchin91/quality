@@ -1,4 +1,5 @@
 import { callDirectionSql } from '../callsDirectory/groups.js';
+import { unusableSql } from '../qaUnusable/unusable.js';
 import { callDurationSql, readCallQaPolicy } from './policy.js';
 import { nanoid } from 'nanoid';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
@@ -144,6 +145,7 @@ function candidateSourceIds(dependencies) {
          AND records.eligibility_decision_version=1 AND records.recording_locator IS NOT NULL
          AND ${callDirectionSql(dependencies.db, 'records')}
          AND ${duration.sql}
+         AND ${unusableSql(dependencies.db, 'call', 'records.id')}
          AND NOT EXISTS(SELECT 1 FROM call_qa_tasks tasks
            WHERE tasks.source_record_id=records.id AND tasks.status<>'cancelled')
        ORDER BY

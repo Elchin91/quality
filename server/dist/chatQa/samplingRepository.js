@@ -1,3 +1,4 @@
+import { unusableSql } from '../qaUnusable/unusable.js';
 import { listReviewerReadiness } from '../reviewerAssignment/repository.js';
 const BAKU_OFFSET_MS = 4 * 60 * 60 * 1_000;
 function bakuMonthBounds(now) {
@@ -20,7 +21,8 @@ export function samplingInput(db, now) {
     const candidates = db
         .prepare(`SELECT id,conversation_id,agent_id,completed_at_utc,channels_json,
         external_agent_ids_json,eligibility_state
-    FROM source_interactions WHERE eligibility_state='eligible' AND agent_id IS NOT NULL`)
+    FROM source_interactions WHERE eligibility_state='eligible' AND agent_id IS NOT NULL
+      AND ${unusableSql(db, 'chat', 'source_interactions.id')}`)
         .all().map((row) => ({
         interactionId: row.id,
         conversationId: row.conversation_id,

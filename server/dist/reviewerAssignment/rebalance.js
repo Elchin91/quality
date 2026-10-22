@@ -3,6 +3,34 @@ import { reassignTask } from '../chatQa/taskLifecycle.js';
 import { listReviewerReadiness, REVIEWER_GROUPS } from './repository.js';
 const REASON = 'Rebalanced to an available reviewer';
 const MAX_MOVES = 500;
+function ensureStateTable(db) {
+    db.exec(`CREATE TABLE IF NOT EXISTS reviewer_rebalance_state (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    ran_at_ms INTEGER NOT NULL,
+    moved INTEGER NOT NULL,
+    failed INTEGER NOT NULL,
+    skipped TEXT
+  )`);
+}
+/** Remembers the outcome of the latest rebalancing for the automation status. */
+export function recordRebalance(db, result, nowMs) {
+    ensureStateTable(db);
+    db.prepare(`INSERT INTO reviewer_rebalance_state (id,ran_at_ms,moved,failed,skipped) VALUES (1,?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET ran_at_ms=excluded.ran_at_ms,moved=excluded.moved,
+       failed=excluded.failed,skipped=excluded.skipped`).run(nowMs, result.moved, result.failed, result.skipped ?? null);
+}
+export function lastRebalance(db) {
+    ensureStateTable(db);
+    const row = db.prepare('SELECT * FROM reviewer_rebalance_state WHERE id=1').get();
+    if (!row)
+        return null;
+    return {
+        ran_at_ms: row.ran_at_ms,
+        moved: row.moved,
+        failed: row.failed,
+        ...(row.skipped ? { skipped: row.skipped } : {}),
+    };
+}
 /** An admin the audit triggers accept: active and past the temporary password. */
 function rebalanceActor(db) {
     const row = db
@@ -95,8 +123,11 @@ function move(db, task, receiver, actorUserId, clock) {
 export function rebalanceReviewerTasks(db, clock = () => new Date()) {
     const result = { moved: 0, failed: 0 };
     const actorUserId = rebalanceActor(db);
-    if (!actorUserId)
+    if (!actorUserId) {
+        result.skipped = 'no_admin_actor';
+        recordRebalance(db, result, clock().getTime());
         return result;
+    }
     const readiness = listReviewerReadiness(db, 0);
     for (const group of REVIEWER_GROUPS) {
         const ready = readiness.filter((row) => row.ready && row.groups.includes(group));
@@ -136,5 +167,6 @@ export function rebalanceReviewerTasks(db, clock = () => new Date()) {
             }
         }
     }
+    recordRebalance(db, result, clock().getTime());
     return result;
 }

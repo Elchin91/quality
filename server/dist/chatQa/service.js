@@ -1,4 +1,5 @@
 import { AiReviewError, validateAiReview } from '../aiEvaluation/review.js';
+import { isUnusable } from '../qaUnusable/unusable.js';
 import { captureContactContext } from '../contactContext/context.js';
 import { recordAiReview } from '../aiEvaluation/persistence.js';
 import { calculateM10Score } from '../prompts/scorecard.js';
@@ -63,7 +64,9 @@ async function createTask(input) {
             if (!interaction || interaction.conversation_id !== normalized.conversationId)
                 fail('not_found', 404);
             validateConversation(interaction, normalized);
-            if (input.assignmentOrigin === 'automatic' && interaction.eligibility_state !== 'eligible')
+            if (input.assignmentOrigin === 'automatic' &&
+                (interaction.eligibility_state !== 'eligible' ||
+                    isUnusable(input.db, 'chat', interaction.id)))
                 fail('source_unavailable');
             if (input.db
                 .prepare("SELECT 1 FROM chat_qa_tasks WHERE interaction_id=? AND status<>'cancelled'")

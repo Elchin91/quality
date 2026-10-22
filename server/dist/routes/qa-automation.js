@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { unusableSql } from '../qaUnusable/unusable.js';
+import { lastRebalance } from '../reviewerAssignment/rebalance.js';
 import { callDurationSql } from '../callQa/policy.js';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
@@ -10,7 +12,7 @@ import { listRosterQuota, quotaFor } from '../qaAutomation/quota.js';
 import { confirmRosterLink, getAutomationEnabled, readRosterSnapshot, removeRosterLink, saveRosterCsv, setAutomationEnabled, } from '../qaAutomation/repository.js';
 import { bakuMonth, UPLOADED_ROSTER_GID } from '../qaAutomation/types.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
-import { listReviewerReadiness } from '../reviewerAssignment/repository.js';
+import { listReviewerReadiness, monthlyAssignments } from '../reviewerAssignment/repository.js';
 import { SOURCE_DIAGNOSTICS } from '../chatQa/sourceDiagnostics.js';
 import { lastDirectorySync } from '../callsDirectory/sync.js';
 import { callDirectionSql } from '../callsDirectory/groups.js';
@@ -70,6 +72,29 @@ function lastChannelSync(db) {
             : null,
     };
 }
+/** Per-reviewer view of why work does or does not reach them. */
+function reviewerBoard(db, readiness, nowMs) {
+    const month = monthlyAssignments(db, readiness.map(({ userId }) => userId), nowMs);
+    const names = new Map(db.prepare("SELECT id,name FROM users WHERE role='reviewer'").all().map((row) => [row.id, row.name]));
+    const count = (status, userId) => ['chat_qa_tasks', 'call_qa_tasks'].reduce((sum, table) => sum +
+        (db
+            .prepare(`SELECT COUNT(*) FROM ${table} WHERE reviewer_user_id=? AND status=?`)
+            .pluck()
+            .get(userId, status) ?? 0), 0);
+    return {
+        reviewers: readiness.map((row) => ({
+            id: row.userId,
+            name: names.get(row.userId) ?? row.userId,
+            ready: row.ready,
+            reason: row.reason,
+            groups: row.groups,
+            not_started: count('assigned', row.userId),
+            in_progress: count('in_progress', row.userId),
+            month_total: month.get(row.userId) ?? 0,
+        })),
+        last_rebalance: lastRebalance(db),
+    };
+}
 export function createQaAutomationRouter(db, options = {}) {
     const router = Router();
     router.use(['/admin/chat-qa/automation', '/admin/call-qa/automation'], requireRole('admin'));
@@ -94,7 +119,8 @@ export function createQaAutomationRouter(db, options = {}) {
                    WHERE source.agent_id=? AND source.eligibility_state='eligible'
                      AND source.completed_at_utc>=? AND source.completed_at_utc<?
                      AND NOT EXISTS(SELECT 1 FROM chat_qa_tasks task
-                       WHERE task.interaction_id=source.id AND task.status<>'cancelled')`)
+                       WHERE task.interaction_id=source.id AND task.status<>'cancelled')
+                     AND ${unusableSql(db, 'chat', 'source.id')}`)
                         .get(item.agentId, bounds.start, bounds.end).count
                     : 0;
                 const call = item.agentId
@@ -104,7 +130,8 @@ export function createQaAutomationRouter(db, options = {}) {
                      AND source.baku_date=? AND ${callDirectionSql(db, 'source')}
                      AND ${callDurationSql(db, 'source').sql}
                      AND NOT EXISTS(SELECT 1 FROM call_qa_tasks task
-                       WHERE task.source_record_id=source.id AND task.status<>'cancelled')`)
+                       WHERE task.source_record_id=source.id AND task.status<>'cancelled')
+                     AND ${unusableSql(db, 'call', 'source.id')}`)
                         .get(item.agentId, bounds.date, ...callDurationSql(db, 'source').params).count
                     : 0;
                 const channelQuota = item.agentId ? quotaFor(db, item.agentId, now, channel) : item;
@@ -155,6 +182,7 @@ export function createQaAutomationRouter(db, options = {}) {
                 last_job: lastJob ?? null,
                 directory: lastDirectorySync(db),
                 last_channel_sync: lastChannelSync(db),
+                reviewer_board: reviewerBoard(db, reviewerReadiness, now),
                 reviewers: {
                     total: reviewerReadiness.length,
                     ready: reviewerReadiness.filter((item) => item.ready).length,

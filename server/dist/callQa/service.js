@@ -280,7 +280,7 @@ export function startCallQaTask(input) {
     });
 }
 export function cancelCallQaTask(input) {
-    const values = captureRuntimeInput(input, ['db', 'taskId', 'actorUserId', 'reason', 'expectedVersion'], ['clock', 'createId'], invalidInput);
+    const values = captureRuntimeInput(input, ['db', 'taskId', 'actorUserId', 'reason', 'expectedVersion'], ['clock', 'createId', 'actorRole'], invalidInput);
     const db = requireDatabase(values.db, invalidInput);
     const taskId = requireIdentifier(values.taskId, invalidInput);
     const actorUserId = requireIdentifier(values.actorUserId, invalidInput);
@@ -289,9 +289,12 @@ export function cancelCallQaTask(input) {
     const clock = values.clock;
     const createId = values.createId;
     const now = nowFrom(clock);
+    const requestedRole = values.actorRole === 'reviewer' ? 'reviewer' : 'admin';
     return runStableImmediate(db, () => {
-        const actorRole = authorizedActor(db, actorUserId, 'admin');
+        const actorRole = authorizedActor(db, actorUserId, requestedRole);
         const current = task(db, taskId);
+        if (actorRole === 'reviewer' && current.reviewer_user_id !== actorUserId)
+            fail('not_found', 404);
         if (current.status === 'completed' || current.status === 'cancelled') {
             fail('task_state_conflict');
         }

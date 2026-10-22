@@ -113,7 +113,9 @@ export function createCallQaScorecardGuards(db, evaluationSchemaReady) {
        OLD.cancelled_at_utc IS NULL AND NEW.cancelled_at_utc IS NOT NULL AND
        NEW.updated_at_utc=NEW.cancelled_at_utc AND NEW.evaluation_id IS NULL AND
        EXISTS(SELECT 1 FROM call_qa_events events WHERE events.task_id=NEW.id AND
-         events.source_record_id=NEW.source_record_id AND events.actor_role='admin' AND
+         events.source_record_id=NEW.source_record_id AND
+         (events.actor_role='admin' OR
+           (events.actor_role='reviewer' AND events.actor_user_id=OLD.reviewer_user_id)) AND
          events.event_type='cancelled' AND events.from_status=OLD.status AND events.to_status='cancelled' AND
          call_qa_safe_reason(events.reason)=1 AND events.metadata_json='{}' AND
          events.created_at_utc=NEW.cancelled_at_utc))${completedTaskPredicate})
@@ -162,7 +164,9 @@ export function createCallQaScorecardGuards(db, evaluationSchemaReady) {
          NEW.actor_role='reviewer' AND NEW.actor_user_id=tasks.reviewer_user_id AND
          NEW.from_status='assigned' AND NEW.to_status='in_progress' AND NEW.reason IS NULL) OR
         (NEW.event_type='cancelled' AND NEW.metadata_json='{}' AND tasks.status IN ('assigned','in_progress') AND
-         NEW.actor_role='admin' AND NEW.from_status=tasks.status AND NEW.to_status='cancelled' AND
+         (NEW.actor_role='admin' OR
+           (NEW.actor_role='reviewer' AND NEW.actor_user_id=tasks.reviewer_user_id)) AND
+         NEW.from_status=tasks.status AND NEW.to_status='cancelled' AND
          call_qa_safe_reason(NEW.reason)=1)${completedEventPredicate})))
     BEGIN SELECT RAISE(ABORT,'invalid call qa event'); END;
 

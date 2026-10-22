@@ -158,7 +158,7 @@ function openWorkloads(db, reviewerUserIds) {
     return result;
 }
 /** Tasks given to each reviewer in the current Baku month (any state but cancelled). */
-function monthlyAssignments(db, reviewerUserIds, nowMs) {
+export function monthlyAssignments(db, reviewerUserIds, nowMs) {
     const result = new Map(reviewerUserIds.map((id) => [id, 0]));
     if (!reviewerUserIds.length)
         return result;

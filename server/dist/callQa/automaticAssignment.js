@@ -1,4 +1,5 @@
 import { directoryGroupOf, expectedCallDirection } from '../callsDirectory/groups.js';
+import { isUnusable } from '../qaUnusable/unusable.js';
 import { callTaskDeadline } from './policy.js';
 import { nanoid } from 'nanoid';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
@@ -139,6 +140,8 @@ export function assignAutomaticCallQaTask(input) {
                 (evaluationsExist &&
                     db.prepare('SELECT 1 FROM evaluations WHERE source_ref=?').get(`call-qa:${source.id}`)))
                 fail('duplicate_task');
+            if (isUnusable(db, 'call', source.id))
+                fail('source_ineligible');
             if (enforceRosterQuota && source.baku_date !== previousBakuDay(now.ms).date)
                 fail('source_ineligible');
             const recordTime = Date.parse(source.call_started_at_utc);

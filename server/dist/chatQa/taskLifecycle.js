@@ -73,8 +73,18 @@ export function reassignTask(input) {
 export function cancelTask(input) {
     const reason = boundedText(input.reason, 2_000);
     return runImmediate(input.db, () => {
-        requireAdmin(input.db, input.actorUserId);
+        if (input.actorRole === 'reviewer') {
+            const reviewer = input.db
+                .prepare("SELECT 1 FROM users WHERE id=? AND role='reviewer' AND active=1")
+                .get(input.actorUserId);
+            if (!reviewer)
+                fail('not_found', 404);
+        }
+        else
+            requireAdmin(input.db, input.actorUserId);
         const current = task(input.db, input.taskId);
+        if (input.actorRole === 'reviewer' && current.reviewer_user_id !== input.actorUserId)
+            fail('not_found', 404);
         if (!['assigned', 'in_progress'].includes(current.status))
             fail('task_state_conflict');
         const now = nowFrom(input.clock).getTime();
