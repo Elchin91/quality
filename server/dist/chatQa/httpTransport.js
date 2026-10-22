@@ -56,6 +56,11 @@ export class CallsChatHttpTransport {
                     retryAfterMs: retryAfterMs(response.headers.get('retry-after')),
                 };
             }
+            // An explicitly empty success (the archive past the first conversation) carries no data.
+            if (response.headers.get('content-length') === '0') {
+                await response.body?.cancel();
+                return { status: response.status, data: null };
+            }
             if (!response.headers.get('content-type')?.toLowerCase().startsWith('application/json') ||
                 !response.body) {
                 await response.body?.cancel();
@@ -159,7 +164,8 @@ export class CallsChatHttpTransport {
             : path === '/api/users/all' ||
                 /^\/api\/users\/filterSearch\?search=&page=\d{1,3}&size=200$/.test(path) ||
                 /^\/api\/profile\/request\/requestById\?requestId=[0-9a-f-]{36}$/.test(path) ||
-                /^\/api\/omnichannel\/conversation\/[1-9]\d*\?activeTabId=[0-9a-f-]{36}$/.test(path);
+                /^\/api\/omnichannel\/conversation\/[1-9]\d*\?activeTabId=[0-9a-f-]{36}$/.test(path) ||
+                /^\/api\/omnichannel\/conversation\/archive\?channelId=[A-Za-z0-9._%+-]{1,96}&conversationId=[1-9]\d{0,15}$/.test(path);
         if (!allowed || (method === 'GET' && body !== undefined))
             throw new SourceDiagnosticError('source_schema_invalid');
         if (this.abort.signal.aborted)

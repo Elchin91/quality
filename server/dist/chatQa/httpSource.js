@@ -35,6 +35,14 @@ export class HttpChatSourceClient {
         this.contactContext = httpContactContextFetcher(this.transport);
     }
     contactContext;
+    async conversationArchive(channelId, conversationId, signal) {
+        const raw = await this.transport.request('GET', `/api/omnichannel/conversation/archive?channelId=${encodeURIComponent(channelId)}&conversationId=${conversationId}`, undefined, signal);
+        // The archive answers with an empty body once the customer has no earlier conversation.
+        return raw && typeof raw === 'object' ? raw : null;
+    }
+    conversationMessages(conversationId, signal) {
+        return this.transport.request('GET', `/api/omnichannel/conversation/${conversationId}?activeTabId=${this.tabId}`, undefined, signal);
+    }
     search(window, number, dateField = 'completeDate', signal) {
         return this.pager.search(window, number, dateField, signal);
     }
