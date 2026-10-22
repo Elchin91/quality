@@ -44,6 +44,13 @@ const interactionQuery = z
     queue: repeated(boundedFilter).optional(),
     channel: repeated(boundedFilter).optional(),
     classifier: repeated(boundedFilter).optional(),
+    customer: z
+        .string()
+        .trim()
+        .max(64)
+        .transform((value) => (/^[+\d\s()-]+$/u.test(value) ? value.replace(/\D/gu, '') : value))
+        .pipe(z.string().min(3).max(64))
+        .optional(),
     exclusion_reason: repeated(boundedFilter).optional(),
     min_client_messages: countText.optional(),
     max_client_messages: countText.optional(),

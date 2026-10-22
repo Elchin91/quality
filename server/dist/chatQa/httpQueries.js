@@ -49,6 +49,7 @@ function interactionDto(db, row) {
         channels: jsonList(String(row.channels_json)),
         queues: jsonList(String(row.queues_json)),
         classifiers: safeClassifiers(row.classifiers_json ?? null),
+        customer_contact: row.customer_contact ?? null,
         agent_id: row.agent_id,
         agent_name: row.agent_name,
         // Pending HTTP chats have no verified message counts yet; never present them as zero.
@@ -89,6 +90,10 @@ export function listInteractions(db, input) {
     ]) {
         addJsonMany(filters, args, column, input[key]);
     }
+    if (input.customer) {
+        filters.push("instr(COALESCE(si.customer_contact,''),?)>0");
+        args.push(input.customer);
+    }
     if (input.classifier?.length) {
         filters.push(`EXISTS (SELECT 1 FROM json_tree(si.classifiers_json)
        WHERE lower(CAST(value AS TEXT)) IN (${input.classifier.map(() => 'lower(?)').join(',')}))`);
@@ -112,7 +117,7 @@ export function listInteractions(db, input) {
     const offset = (input.page - 1) * input.page_size;
     const rows = db
         .prepare(`SELECT si.id,si.completed_at_utc,si.baku_date,si.channels_json,si.queues_json,
-       si.classifiers_json,si.agent_id,a.name agent_name,si.client_message_count,
+       si.classifiers_json,si.customer_contact,si.agent_id,a.name agent_name,si.client_message_count,
        si.agent_message_count,si.attachment_count,si.eligibility_state,
        si.exclusion_reasons_json,si.external_agent_ids_json,qt.id task_id,qt.status task_status,
        qt.reviewer_user_id,reviewer.name reviewer_name,qt.deadline_at
@@ -123,7 +128,7 @@ export function listInteractions(db, input) {
 export function interactionDetail(db, id, now = Date.now()) {
     const row = db
         .prepare(`SELECT si.id,si.completed_at_utc,si.baku_date,si.channels_json,si.queues_json,
-       si.classifiers_json,si.agent_id,a.name agent_name,si.client_message_count,
+       si.classifiers_json,si.customer_contact,si.agent_id,a.name agent_name,si.client_message_count,
        si.agent_message_count,si.attachment_count,si.eligibility_state,
        si.exclusion_reasons_json,si.external_agent_ids_json,si.first_seen_at,si.last_seen_at,
        qt.id task_id,qt.status task_status,qt.reviewer_user_id,reviewer.name reviewer_name,

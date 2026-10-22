@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { callDurationSql } from '../callQa/policy.js';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
 import { asyncHandler } from '../asyncHandler.js';
@@ -101,9 +102,10 @@ export function createQaAutomationRouter(db, options = {}) {
                         .prepare(`SELECT COUNT(*) count FROM call_source_records source
                    WHERE source.agent_id=? AND source.eligibility_status='eligible'
                      AND source.baku_date=? AND ${callDirectionSql(db, 'source')}
+                     AND ${callDurationSql(db, 'source').sql}
                      AND NOT EXISTS(SELECT 1 FROM call_qa_tasks task
                        WHERE task.source_record_id=source.id AND task.status<>'cancelled')`)
-                        .get(item.agentId, bounds.date).count
+                        .get(item.agentId, bounds.date, ...callDurationSql(db, 'source').params).count
                     : 0;
                 const channelQuota = item.agentId ? quotaFor(db, item.agentId, now, channel) : item;
                 const shortfallReason = item.reason !== 'ready'

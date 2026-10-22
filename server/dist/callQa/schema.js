@@ -221,6 +221,7 @@ export function createCallQaSchema(db) {
     addColumnIfMissing(db, 'call_source_records', 'external_agent_name', 'TEXT');
     addColumnIfMissing(db, 'call_source_records', 'direction', 'TEXT');
     addColumnIfMissing(db, 'call_source_records', 'queue_label', 'TEXT');
+    addColumnIfMissing(db, 'call_source_records', 'caller_number', "TEXT CHECK(caller_number IS NULL OR (length(caller_number) BETWEEN 7 AND 15 AND caller_number NOT GLOB '*[^0-9]*'))");
     addColumnIfMissing(db, 'call_source_records', 'eligibility_status', "TEXT NOT NULL DEFAULT 'eligible' CHECK(eligibility_status IN ('eligible','ineligible'))");
     addColumnIfMissing(db, 'call_source_records', 'eligibility_reason', 'TEXT');
     addColumnIfMissing(db, 'call_source_records', 'eligibility_decision_version', 'INTEGER NOT NULL DEFAULT 0 CHECK(eligibility_decision_version IN (0,1))');

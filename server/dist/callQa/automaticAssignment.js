@@ -1,4 +1,5 @@
 import { directoryGroupOf, expectedCallDirection } from '../callsDirectory/groups.js';
+import { callTaskDeadline } from './policy.js';
 import { nanoid } from 'nanoid';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { operatorChannelCapacity, operatorMonthlyCapacity, quotaFor, } from '../qaAutomation/quota.js';
@@ -178,7 +179,7 @@ export function assignAutomaticCallQaTask(input) {
            (id,source_record_id,agent_id,reviewer_user_id,status,assignment_origin,
             assigned_by_user_id,assignment_reason,assignment_explanation,deadline_at_utc,
             version,assigned_at_utc,created_at_utc,updated_at_utc,scorecard_kind)
-         VALUES (?,?,?,?,'assigned','automatic',NULL,?,?,NULL,1,?,?,?,?)`).run(taskId, source.id, source.agent_id, reviewer.userId, reason, explanation, now.iso, now.iso, now.iso, directoryGroupOf(db, source.agent_id) === 'telesales' ? 'telesales' : 'm10');
+         VALUES (?,?,?,?,'assigned','automatic',NULL,?,?,?,1,?,?,?,?)`).run(taskId, source.id, source.agent_id, reviewer.userId, reason, explanation, callTaskDeadline(db, new Date(now.iso)), now.iso, now.iso, now.iso, directoryGroupOf(db, source.agent_id) === 'telesales' ? 'telesales' : 'm10');
             withCallQaSystemAuthorization(db, () => db
                 .prepare(`INSERT INTO call_qa_events
              (id,task_id,source_record_id,actor_user_id,actor_role,event_type,from_status,to_status,

@@ -66,7 +66,8 @@ function reportQuery(cursor, limit) {
       WHERE a.request_id = c.request_id AND a.user_id = c.user_id
         AND a.type = ? AND a.completed_date IS NOT NULL) AS completedDate,
     CASE WHEN CHAR_LENGTH(REGEXP_REPLACE(c.number, '[^0-9]', '')) >= 4
-      THEN RIGHT(REGEXP_REPLACE(c.number, '[^0-9]', ''), 4) ELSE NULL END AS callerLastFour
+      THEN RIGHT(REGEXP_REPLACE(c.number, '[^0-9]', ''), 4) ELSE NULL END AS callerLastFour,
+    REGEXP_REPLACE(c.number, '[^0-9]', '') AS callerNumber
     FROM report.call_report c
     LEFT JOIN report.users u ON u.id = c.user_id
     WHERE c.type = ? AND c.queue_name = ?
@@ -116,7 +117,7 @@ function rawRecord(row) {
         talkEndedAt: row.endDate,
         externalAgentId: row.userId,
         externalAgentName: cleanName(row.fullName) ?? cleanName(fallback),
-        callerPhone: row.callerLastFour,
+        callerPhone: row.callerNumber || row.callerLastFour,
         direction: 'in',
         queueLabel: 'm10',
         sourceDurationSeconds: duration,

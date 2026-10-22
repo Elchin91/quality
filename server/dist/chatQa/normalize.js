@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { assertDisplayEvidenceBudget, assertSourceEvidenceBudget, } from './evidenceSecurity.js';
+import { assertDisplayEvidenceBudget, assertSourceEvidenceBudget } from './evidenceSecurity.js';
 const ACTIVE_REQUEST_STATUSES = new Set(['ACTIVE', 'WAITING', 'IN_PROGRESS', 'OPEN']);
 const IMAGE_EXTENSIONS = new Set([
     'avif',

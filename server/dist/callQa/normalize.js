@@ -114,6 +114,18 @@ function safeLabel(value) {
     }
     return normalized;
 }
+function callerDigits(value) {
+    const source = typeof value === 'string'
+        ? value
+        : typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+            ? String(value)
+            : '';
+    return source.replace(/\D/gu, '');
+}
+function fullNumber(value) {
+    const digits = callerDigits(value);
+    return digits.length >= 7 && digits.length <= 15 ? digits : null;
+}
 function lastFour(value) {
     const source = typeof value === 'string'
         ? value
@@ -214,6 +226,7 @@ export function normalizeCallSourceRecord(source, protection = {}) {
         externalAgentId,
         externalAgentName,
         callerLastFour: lastFour(source.callerPhone),
+        callerNumber: fullNumber(source.callerPhone),
         direction,
         queueLabel,
         sourceDurationSeconds: sourceDurationSeconds ?? null,

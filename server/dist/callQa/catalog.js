@@ -52,6 +52,7 @@ function validate(query) {
         (query.queueLabel !== undefined && !safeFilter(query.queueLabel)) ||
         (query.recordingStatus !== undefined && !RECORDING_STATUSES.has(query.recordingStatus)) ||
         (query.eligibilityStatus !== undefined && !ELIGIBILITY_STATUSES.has(query.eligibilityStatus)) ||
+        (query.customerNumber !== undefined && !/^\d{3,15}$/u.test(query.customerNumber)) ||
         !validAssignment) {
         throw new Error('invalid call catalog query');
     }
@@ -73,6 +74,10 @@ function whereClause(query) {
             clauses.push(`${column}=?`);
             params.push(value);
         }
+    }
+    if (query.customerNumber !== undefined) {
+        clauses.push("instr(COALESCE(records.caller_number,''),?)>0");
+        params.push(query.customerNumber);
     }
     if (query.assignmentStatus === 'unassigned')
         clauses.push('tasks.id IS NULL');
@@ -99,6 +104,7 @@ export function listCallCatalog(db, query) {
         .prepare(`SELECT records.id,records.source_ref,records.external_agent_name,
               records.call_started_at_utc,records.call_ended_at_utc,records.baku_date,
               records.duration_seconds,records.agent_id,records.caller_last_four,
+              records.caller_number,
               records.direction,records.queue_label,records.recording_status,
               records.eligibility_status,records.eligibility_reason,
               records.first_seen_at,records.last_seen_at,tasks.id AS task_id,
@@ -150,6 +156,7 @@ export function listCallCatalog(db, query) {
                     ? { id: row.mapped_agent_id, displayName: row.mapped_agent_name }
                     : null,
                 callerLastFour: row.caller_last_four,
+                callerNumber: row.caller_number,
                 direction: row.direction,
                 queueLabel: row.queue_label,
                 recordingStatus: row.recording_status,

@@ -353,5 +353,9 @@ export function createChatQaSchema(db, clock = () => new Date()) {
     if (!interactionColumns.some(({ name }) => name === 'message_counts_verified_at')) {
         db.exec('ALTER TABLE source_interactions ADD COLUMN message_counts_verified_at INTEGER');
     }
+    if (!interactionColumns.some(({ name }) => name === 'customer_contact')) {
+        // Customer channel id (WhatsApp phone, Telegram id) shown to reviewers and searchable.
+        db.exec('ALTER TABLE source_interactions ADD COLUMN customer_contact TEXT');
+    }
     db.prepare('INSERT OR IGNORE INTO chat_sampling_policy (id, updated_at) VALUES (1, ?)').run(now);
 }

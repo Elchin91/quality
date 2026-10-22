@@ -5,8 +5,8 @@ import { CallsChatHttpTransport } from '../chatQa/httpTransport.js';
 import { CALL_SOURCE_MAX_PAGE_SIZE, CALL_SOURCE_MAX_WINDOW_DAYS } from './sourceConfig.js';
 import { CALL_SOURCE_PROJECTION, } from './sourceClient.js';
 import { isObservedOmnichannelId } from './sourceTypes.js';
-/** Telesales outbound calls shorter than this were not real conversations. */
-export const MIN_OUTBOUND_TALK_SECONDS = 30;
+/** Outbound calls need some talk time; the call policy sets the minimum for reviews. */
+export const MIN_OUTBOUND_TALK_SECONDS = 1;
 // Search is by completion time; calls answered before midnight may finish shortly after it.
 const COMPLETION_MARGIN_MS = 2 * 60 * 60 * 1_000;
 const DAY_MS = 86_400_000;
@@ -33,7 +33,7 @@ const callRowSchema = z
         .optional(),
 })
     .passthrough();
-/** Answered inbound m10 calls and answered outbound calls (Telesales) of at least 30 s. */
+/** Answered inbound m10 calls and answered outbound calls (Telesales); policy filters length. */
 export function httpCallRecord(raw) {
     const parsed = callRowSchema.safeParse(raw);
     if (!parsed.success)
@@ -68,7 +68,7 @@ export function httpCallRecord(raw) {
         talkEndedAt: end,
         externalAgentId: row.agentId,
         externalAgentName: row.agent?.trim() || null,
-        callerPhone: digits.length >= 4 ? digits.slice(-4) : null,
+        callerPhone: digits.length >= 4 ? digits : null,
         direction,
         queueLabel: direction === 'in' ? 'm10' : (row.queueName?.trim() ?? null),
         sourceDurationSeconds: row.talkDuration ?? null,

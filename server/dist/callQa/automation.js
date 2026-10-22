@@ -1,4 +1,5 @@
 import { callDirectionSql } from '../callsDirectory/groups.js';
+import { callDurationSql, readCallQaPolicy } from './policy.js';
 import { nanoid } from 'nanoid';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { quotaFor } from '../qaAutomation/quota.js';
@@ -130,6 +131,7 @@ async function syncPreviousDay(dependencies, signal) {
 }
 function candidateSourceIds(dependencies) {
     const day = previousBakuDay(nowFrom(dependencies.clock));
+    const duration = callDurationSql(dependencies.db, 'records');
     // A cancelled task frees its recording again, as for chats.
     return dependencies.db
         .prepare(`SELECT records.id,records.agent_id
@@ -141,6 +143,7 @@ function candidateSourceIds(dependencies) {
          AND records.agent_id IS NOT NULL AND records.eligibility_status='eligible'
          AND records.eligibility_decision_version=1 AND records.recording_locator IS NOT NULL
          AND ${callDirectionSql(dependencies.db, 'records')}
+         AND ${duration.sql}
          AND NOT EXISTS(SELECT 1 FROM call_qa_tasks tasks
            WHERE tasks.source_record_id=records.id AND tasks.status<>'cancelled')
        ORDER BY
@@ -149,7 +152,7 @@ function candidateSourceIds(dependencies) {
           WHERE tasks.agent_id=records.agent_id AND prior.baku_date=records.baku_date
             AND tasks.status<>'cancelled') ASC,
          RANDOM() LIMIT ?`)
-        .all(day.date, MAX_CANDIDATES_PER_CYCLE);
+        .all(day.date, ...duration.params, MAX_CANDIDATES_PER_CYCLE);
 }
 /** Source I/O precedes the immediate transaction inside assignAutomaticCallQaTask. */
 export function createCallQaAutomation(dependencies) {
@@ -167,7 +170,8 @@ export function createCallQaAutomation(dependencies) {
                 throw new Error('call qa automation aborted');
             if (syncCatalog)
                 await syncPreviousDay(dependencies, signal);
-            if (!assignEnabled)
+            // The call policy can switch automatic call reviews off on its own.
+            if (!assignEnabled || !readCallQaPolicy(dependencies.db).enabled)
                 return;
             if (!dependencies.recordingClient || !dependencies.recordingStore)
                 throw new Error('call qa recording dependency unavailable');

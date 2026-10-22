@@ -60,6 +60,7 @@ export function createCallQaAdminRouter(options) {
                 ...(query.recording_status ? { recordingStatus: query.recording_status } : {}),
                 ...(query.eligibility_status ? { eligibilityStatus: query.eligibility_status } : {}),
                 ...(query.assignment_status ? { assignmentStatus: query.assignment_status } : {}),
+                ...(query.customer_number ? { customerNumber: query.customer_number } : {}),
             });
             res.json(pageDto(result, adminSourceDto));
         }

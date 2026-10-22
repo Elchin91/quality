@@ -1,3 +1,4 @@
+import { rebalanceReviewerTasks } from '../reviewerAssignment/rebalance.js';
 import { runChatQaCycle } from '../chatQa/scheduler.js';
 import { refreshCurrentRoster } from '../qaAutomation/googleSheets.js';
 import { autoLinkRosterPeople, readRosterSnapshot, rosterIsFresh, } from '../qaAutomation/repository.js';
@@ -100,6 +101,15 @@ export async function runQaAutomationCycle(input) {
     ]);
     if (input.signal.aborted)
         throw new Error('job aborted');
+    // Local only: runs even when a source is down, e.g. after a reviewer is switched back on.
+    if (assignEnabled) {
+        try {
+            result.rebalanced = rebalanceReviewerTasks(input.db, input.clock).moved;
+        }
+        catch {
+            result.rebalanced = 0;
+        }
+    }
     if (result.chat !== 'succeeded' && result.call !== 'succeeded') {
         throw new Error('qa automation sources unavailable');
     }

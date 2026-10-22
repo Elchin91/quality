@@ -78,6 +78,12 @@ export const catalogQuery = z
     recording_status: recordingStatus.optional(),
     eligibility_status: eligibilityStatus.optional(),
     assignment_status: z.union([taskStatus, z.literal('unassigned')]).optional(),
+    customer_number: z
+        .string()
+        .max(32)
+        .transform((value) => value.replace(/\D/gu, ''))
+        .pipe(z.string().regex(/^\d{3,15}$/u))
+        .optional(),
 })
     .strict();
 export const taskQuery = z
@@ -281,6 +287,9 @@ export function adminSourceDto(value) {
         mapped_agent: mappedAgent,
         caller_last_four: typeof source.callerLastFour === 'string' && /^\d{4}$/u.test(source.callerLastFour)
             ? source.callerLastFour
+            : null,
+        caller_number: typeof source.callerNumber === 'string' && /^\d{7,15}$/u.test(source.callerNumber)
+            ? source.callerNumber
             : null,
         direction: source.direction,
         queue_label: source.queueLabel,

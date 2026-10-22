@@ -36,6 +36,15 @@ function hasLiveTask(db, interactionId) {
         .prepare("SELECT 1 FROM chat_qa_tasks WHERE interaction_id=? AND status<>'cancelled' LIMIT 1")
         .get(interactionId));
 }
+/** The customer's channel id (WhatsApp phone, Telegram id), trimmed and bounded. */
+function customerContactOf(requests) {
+    for (const request of requests) {
+        const value = request.customerContact?.trim();
+        if (value && value.length <= 64)
+            return value;
+    }
+    return null;
+}
 function persistConversation(db, conversation, runId, now) {
     if (hasLegacyRequestOwner(db, conversation))
         return;
@@ -49,8 +58,8 @@ function persistConversation(db, conversation, runId, now) {
      (id,source_system,conversation_id,completed_at_utc,baku_date,channels_json,queues_json,
       classifiers_json,external_agent_ids_json,agent_id,client_message_count,agent_message_count,
       eligibility_state,exclusion_reasons_json,first_seen_at,last_seen_at,last_sync_run_id,
-      message_counts_verified_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      message_counts_verified_at,customer_contact)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(source_system,conversation_id) DO UPDATE SET
        completed_at_utc=excluded.completed_at_utc,
        baku_date=excluded.baku_date,
@@ -65,7 +74,8 @@ function persistConversation(db, conversation, runId, now) {
        exclusion_reasons_json=excluded.exclusion_reasons_json,
        last_seen_at=excluded.last_seen_at,
        last_sync_run_id=excluded.last_sync_run_id,
-       message_counts_verified_at=excluded.message_counts_verified_at`).run(interactionId, SOURCE_SYSTEM, conversation.conversationId, conversation.completedAt.getTime(), bakuDate(conversation.completedAt), JSON.stringify(conversation.channels), JSON.stringify(conversation.queues), JSON.stringify(conversation.classifiers), JSON.stringify(conversation.externalAgentIds), conversation.mappedAgentId, conversation.clientMessageCount ?? 0, conversation.agentMessageCount ?? 0, conversation.eligibilityState, JSON.stringify(conversation.exclusionReasons), now, now, runId, conversation.countsVerifiedAt);
+       message_counts_verified_at=excluded.message_counts_verified_at,
+       customer_contact=COALESCE(excluded.customer_contact,source_interactions.customer_contact)`).run(interactionId, SOURCE_SYSTEM, conversation.conversationId, conversation.completedAt.getTime(), bakuDate(conversation.completedAt), JSON.stringify(conversation.channels), JSON.stringify(conversation.queues), JSON.stringify(conversation.classifiers), JSON.stringify(conversation.externalAgentIds), conversation.mappedAgentId, conversation.clientMessageCount ?? 0, conversation.agentMessageCount ?? 0, conversation.eligibilityState, JSON.stringify(conversation.exclusionReasons), now, now, runId, conversation.countsVerifiedAt, customerContactOf(conversation.requests));
     const upsertRequest = db.prepare(`INSERT INTO source_interaction_requests
      (id,interaction_id,request_uuid,status,queue,channel,completed_at_source,first_seen_at,last_seen_at)
      VALUES (?,?,?,?,?,?,?,?,?)
