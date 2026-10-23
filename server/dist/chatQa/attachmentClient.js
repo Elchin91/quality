@@ -139,8 +139,13 @@ function sniffContentType(bytes) {
         return 'audio/mpeg';
     if (bytes.subarray(0, 5).toString('ascii') === '%PDF-')
         return 'application/pdf';
-    if (bytes.subarray(4, 8).toString('ascii') === 'ftyp')
-        return 'video/mp4';
+    if (bytes.subarray(4, 8).toString('ascii') === 'ftyp') {
+        // ISO media: 3GP from older phones, otherwise MP4/QuickTime (H.264 plays as video/mp4).
+        return bytes.subarray(8, 11).toString('ascii') === '3gp' ? 'video/3gpp' : 'video/mp4';
+    }
+    // Matroska / WebM (EBML header), e.g. videos recorded in a browser.
+    if (starts(bytes, [0x1a, 0x45, 0xdf, 0xa3]))
+        return 'video/webm';
     return 'application/octet-stream';
 }
 export class CallsOmniAttachmentClient {
