@@ -62,6 +62,7 @@ export function createCallQaReviewerRouter(options) {
                 page: query.page,
                 pageSize: query.page_size,
                 ...(query.status ? { status: query.status } : {}),
+                ...(query.customer_number ? { customerNumber: query.customer_number } : {}),
             });
             res.json(pageDto(result, reviewerTaskDto));
         }

@@ -5,6 +5,7 @@ import { db } from '../db.js';
 import { generateJsonWithMetadata } from '../ollama.js';
 import { logger } from '../logger.js';
 import { evaluateConversation } from '../aiEvaluation/evaluator.js';
+import { standardKindFor } from '../prompts/scorecardRegistry.js';
 import { callSourceItems } from '../aiEvaluation/source.js';
 import { requireAdmin } from '../auth.js';
 import { scorecardReviewRouter } from './scorecard-review.js';
@@ -142,6 +143,8 @@ scorecardRouter.post('/scorecard/evaluate', asyncHandler(async (req, res) => {
     }
     if (!sourceText)
         return res.status(400).json({ error: 'no text or transcription found' });
+    // New upload drafts are drafted (and later committed) on the standard v2 checklist.
+    const scorecard = standardKindFor(body.type);
     let score;
     try {
         score = await evaluateConversation({
@@ -158,6 +161,7 @@ scorecardRouter.post('/scorecard/evaluate', asyncHandler(async (req, res) => {
                 ],
             },
             language: toScorecardLanguage(transcriptionLanguage),
+            scorecard,
             generate: ({ prompt, system, signal, generation_options }) => generateJsonWithMetadata(prompt, system, { ...generation_options, signal }),
         });
     }
@@ -174,6 +178,7 @@ scorecardRouter.post('/scorecard/evaluate', asyncHandler(async (req, res) => {
          created_at, expires_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(draft_id, req.user?.id ?? 'unknown', body.agent_id || null, upload_id || null, transcription_id || null, sourceText, score.score, JSON.stringify(score.criteria), score.summary, JSON.stringify(score.strengths), JSON.stringify(score.improvements), score.language, body.type, now, now + DRAFT_TTL_MS);
     db.prepare('UPDATE evaluation_drafts SET ai_metadata_json=? WHERE id=?').run(JSON.stringify({
+        scorecard,
         run_id: score.run_id,
         warnings: score.warnings,
         evidence: score.evidence,

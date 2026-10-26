@@ -21,34 +21,10 @@ const listQuery = z
 })
     .strict();
 const REVIEWER_REPEATED_FILTERS = new Set(['status']);
-const score = z.number().finite().min(0).max(4);
-const criteriaSchema = z
-    .object({
-    instruction_compliance: score,
-    willingness_to_help: score,
-    problem_solving: score,
-    empathy: score,
-    proactivity: score,
-    effective_communication: score,
-    patience: score,
-    risk_management: score.nullable(),
-    tone_of_voice: score,
-})
-    .strict();
-const note = z.string().trim().max(2_000);
-const notesSchema = z
-    .object({
-    instruction_compliance: note,
-    willingness_to_help: note,
-    problem_solving: note,
-    empathy: note,
-    proactivity: note,
-    effective_communication: note,
-    patience: note,
-    risk_management: note,
-    tone_of_voice: note,
-})
-    .strict();
+// Criteria/notes are validated by the service against the chat_v2 checklist, so a stale M10 form
+// gets scorecard_version_mismatch instead of a generic schema rejection.
+const criteriaSchema = z.record(z.string().max(64), z.unknown());
+const notesSchema = z.record(z.string().max(64), z.unknown());
 const completionSchema = z
     .object({
     ai_review: aiReviewShape.optional(),

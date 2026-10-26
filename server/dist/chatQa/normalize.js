@@ -53,6 +53,15 @@ function attachmentExtension(message) {
     const extension = value(message.extension)?.replace(/^\./u, '').toLowerCase() ?? null;
     return extension && /^[a-z0-9]{1,16}$/u.test(extension) ? extension : null;
 }
+/**
+ * Upstream fileById resolves object keys case-sensitively (operator uploads are stored as
+ * `.MP4`/`.MOV`), so the server-only locator keeps the source's original extension case.
+ * Evidence, bindings and content hashes keep using the lowercase `attachmentExtension`.
+ */
+function attachmentLocatorExtension(message) {
+    const extension = value(message.extension)?.replace(/^\./u, '') ?? null;
+    return extension && /^[A-Za-z0-9]{1,16}$/u.test(extension) ? extension : null;
+}
 function attachmentDisplayName(message) {
     const fileName = value(message.fileName);
     if (!fileName || fileName.length > 255 || /[/\\]/u.test(fileName))
@@ -61,7 +70,7 @@ function attachmentDisplayName(message) {
 }
 function attachmentLocator(message, category) {
     const fileName = value(message.fileName);
-    const extension = attachmentExtension(message);
+    const extension = attachmentLocatorExtension(message);
     if (!fileName || !extension || !ATTACHMENT_OBJECT_KEY.test(fileName))
         return null;
     return { fileName, extension, category };

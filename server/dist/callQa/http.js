@@ -91,6 +91,12 @@ export const taskQuery = z
     page: integerText.transform(Number).pipe(z.number().int().min(1).max(10_000)).default('1'),
     page_size: integerText.transform(Number).pipe(z.number().int().min(1).max(100)).default('50'),
     status: taskStatus.optional(),
+    customer_number: z
+        .string()
+        .max(32)
+        .transform((value) => value.replace(/\D/gu, ''))
+        .pipe(z.string().regex(/^\d{3,15}$/u))
+        .optional(),
 })
     .strict();
 export const assignmentBody = z
@@ -105,41 +111,15 @@ export const cancelBody = z
     .object({ reason: safeText.max(1_000), expected_version: positiveVersion })
     .strict();
 export const startBody = z.object({ expected_version: positiveVersion }).strict();
-const score = z.number().int().min(0).max(4);
-const criteriaShape = {
-    instruction_compliance: score,
-    willingness_to_help: score,
-    problem_solving: score,
-    empathy: score,
-    proactivity: score,
-    effective_communication: score,
-    patience: score,
-    risk_management: score.nullable(),
-    tone_of_voice: score,
-};
-const note = z
-    .string()
-    .trim()
-    .max(2_000)
-    // eslint-disable-next-line no-control-regex -- rejects C0/DEL at the HTTP boundary
-    .regex(/^[^\u0000-\u001F\u007F]*$/u);
-const noteShape = {
-    instruction_compliance: note.optional(),
-    willingness_to_help: note.optional(),
-    problem_solving: note.optional(),
-    empathy: note.optional(),
-    proactivity: note.optional(),
-    effective_communication: note.optional(),
-    patience: note.optional(),
-    risk_management: note.optional(),
-    tone_of_voice: note.optional(),
-};
+// Criteria and notes are checked by the service against the task's checklist (call_v2 or
+// Telesales), so an M10 body can be answered with scorecard_version_mismatch.
+const criterionKey = z.string().min(1).max(64);
 export const completionBody = z
     .object({
     expected_version: positiveVersion,
     ai_review: aiReviewShape.optional(),
-    criteria: z.object(criteriaShape).strict(),
-    criteria_notes: z.object(noteShape).strict(),
+    criteria: z.record(criterionKey, z.unknown()),
+    criteria_notes: z.record(criterionKey, z.unknown()),
     overall_note: z
         .string()
         .trim()
@@ -357,6 +337,9 @@ export function reviewerTaskDto(value) {
             baku_date: talk.bakuDate,
             duration_seconds: talk.durationSeconds,
             caller_last_four: talk.callerLastFour,
+            caller_number: typeof talk.callerNumber === 'string' && /^\d{7,15}$/u.test(talk.callerNumber)
+                ? talk.callerNumber
+                : null,
             direction: talk.direction,
             queue_label: talk.queueLabel,
         },
@@ -383,6 +366,7 @@ export function draftDto(value) {
         'run_id',
         'warnings',
         'evidence',
+        'ai_draft_status',
     ]);
 }
 export function transcriptionDto(value) {

@@ -1,6 +1,7 @@
 import { nanoid } from 'nanoid';
-import { calculateM10Score, SCORECARD_CRITERIA } from '../prompts/scorecard.js';
-import { calculateTelesalesScore, evaluationScorecardKind, TELESALES_CRITERION_KEYS, } from '../prompts/telesalesScorecard.js';
+import { SCORECARD_CRITERIA } from '../prompts/scorecard.js';
+import { evaluationScorecardKind, TELESALES_CRITERION_KEYS, } from '../prompts/telesalesScorecard.js';
+import { criteriaKeysFor, isQaV2Kind, parseCriteriaFor, scoreFor, } from '../prompts/scorecardRegistry.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 import { appealEligibility } from './date.js';
 import { normalizeAlias, selectEligibleReviewer } from './assignment.js';
@@ -52,7 +53,27 @@ function validateCriteria(criteria) {
         (typeof risk !== 'number' || !Number.isFinite(risk) || risk < 0 || risk > 4)) {
         throw new AppealError('appeal_state_conflict', 400);
     }
-    return criteria;
+    return Object.fromEntries(SCORECARD_CRITERIA.map(({ key }) => [key, criteria[key]]));
+}
+const M10_KEYS = new Set(SCORECARD_CRITERIA.map(({ key }) => key));
+/** v2 evaluations are rescored on their own thumbs checklist; an M10 body is a stale form. */
+function validateQaV2Criteria(kind, criteria) {
+    if (Object.keys(criteria).some((key) => M10_KEYS.has(key)))
+        throw new AppealError('scorecard_version_mismatch', 400);
+    try {
+        return parseCriteriaFor(kind, criteria);
+    }
+    catch {
+        throw new AppealError('appeal_state_conflict', 400);
+    }
+}
+/** Criteria validated against the checklist the original evaluation was completed on. */
+function validateForKind(kind, criteria) {
+    if (isQaV2Kind(kind))
+        return validateQaV2Criteria(kind, criteria);
+    if (kind === 'telesales')
+        return validateTelesalesCriteria(criteria);
+    return validateCriteria(criteria);
 }
 function mappedLeadUserId(db, label) {
     const row = db
@@ -291,18 +312,13 @@ export class AppealService {
             const evaluation = this.db
                 .prepare('SELECT score,criteria_json,source_metadata_json FROM evaluations WHERE id=?')
                 .get(appeal.evaluation_id);
-            const telesales = evaluationScorecardKind(evaluation.source_metadata_json) === 'telesales';
-            const criteria = telesales
-                ? validateTelesalesCriteria(input.criteria)
-                : validateCriteria(input.criteria);
+            const kind = evaluationScorecardKind(evaluation.source_metadata_json, evaluation.criteria_json);
+            const criteria = validateForKind(kind, input.criteria);
             const prior = JSON.parse(evaluation.criteria_json);
-            const keys = telesales ? TELESALES_CRITERION_KEYS : SCORECARD_CRITERIA.map(({ key }) => key);
-            const changed = keys.some((key) => prior[key] !== criteria[key]);
+            const changed = criteriaKeysFor(kind).some((key) => prior[key] !== criteria[key]);
             const next = changed ? 'adjusted' : 'upheld';
             const now = Date.now();
-            const score = telesales
-                ? calculateTelesalesScore(criteria)
-                : calculateM10Score(criteria);
+            const score = scoreFor(kind, criteria);
             this.db
                 .prepare(`INSERT INTO evaluation_revisions
         (id,evaluation_id,appeal_id,prior_score,prior_criteria_json,new_score,new_criteria_json,reviewer_user_id,reviewer_note,created_at)

@@ -3,17 +3,22 @@ import { recordAiReview, readRunFields } from './aiEvaluation/persistence.js';
 import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
-import { calculateM10Score, criteriaShape, SCORECARD_CRITERIA } from './prompts/scorecard.js';
+import { criteriaShape, SCORECARD_CRITERIA } from './prompts/scorecard.js';
+import { calculateQaV2Score } from './prompts/qaV2Scorecard.js';
+import { criteriaKeysFor, parseCriteriaFor, scoreFor } from './prompts/scorecardRegistry.js';
+const M10_KEYS = new Set(SCORECARD_CRITERIA.map((item) => item.key));
 const note = z.string().trim().max(4000);
-const notes = z
-    .record(z.string(), note)
-    .refine((value) => Object.keys(value).every((key) => SCORECARD_CRITERIA.some((item) => item.key === key)), 'unknown criterion note');
+// Keys and values are checked against the draft's own checklist in finalReview().
+const notes = z.record(z.string().max(64), note);
+const criteriaInput = z
+    .record(z.string().max(64), z.number().nullable())
+    .refine((value) => Object.keys(value).length <= 32);
 const narrativeList = z.array(z.string().trim().max(4000)).max(50);
 export const reviewCommitSchema = z
     .object({
     draft_id: z.string().min(1),
     ai_review: aiReviewShape.optional(),
-    criteria: criteriaShape.optional(),
+    criteria: criteriaInput.optional(),
     criteria_notes: notes.optional(),
     summary: note.optional(),
     strengths: narrativeList.optional(),
@@ -31,14 +36,21 @@ export class ReviewError extends Error {
         this.httpStatus = httpStatus;
     }
 }
+function kindOf(value) {
+    return value === 'chat_v2' || value === 'call_v2' ? value : 'm10';
+}
 function snapshot(draft, db) {
     const stored = draft.ai_metadata_json
         ? JSON.parse(draft.ai_metadata_json)
         : {};
+    const scorecard = kindOf(stored.scorecard);
     const fields = db && stored.run_id ? { ...stored, ...readRunFields(db, stored.run_id) } : stored;
     return {
         ...fields,
-        criteria: criteriaShape.parse(JSON.parse(draft.criteria_json)),
+        scorecard,
+        criteria: scorecard === 'm10'
+            ? criteriaShape.parse(JSON.parse(draft.criteria_json))
+            : parseCriteriaFor(scorecard, JSON.parse(draft.criteria_json)),
         score: draft.score,
         summary: draft.summary,
         strengths: JSON.parse(draft.strengths_json),
@@ -67,8 +79,35 @@ function canonical(value) {
 function fingerprint(value) {
     return createHash('sha256').update(canonical(value)).digest('hex');
 }
+/** M10 legacy drafts keep the 0–4 schema; v2 drafts follow the chat/call completion rules. */
+function reviewedCriteria(kind, input, original) {
+    const raw = input.criteria ?? original.criteria;
+    const rawNotes = input.criteria_notes ?? {};
+    const keys = new Set(criteriaKeysFor(kind));
+    if (kind === 'm10') {
+        if (Object.keys(rawNotes).some((key) => !keys.has(key)))
+            throw new ReviewError('invalid_input', 400);
+        return { criteria: criteriaShape.parse(raw), notes: rawNotes };
+    }
+    if (Object.keys(raw).some((key) => M10_KEYS.has(key)))
+        throw new ReviewError('scorecard_version_mismatch', 400);
+    let criteria;
+    try {
+        criteria = parseCriteriaFor(kind, raw);
+    }
+    catch {
+        throw new ReviewError('invalid_input', 400);
+    }
+    if (Object.keys(rawNotes).some((key) => !keys.has(key)))
+        throw new ReviewError('invalid_input', 400);
+    for (const [key, value] of Object.entries(criteria))
+        if (value === 0 && !rawNotes[key])
+            throw new ReviewError('invalid_input', 400);
+    return { criteria, notes: rawNotes };
+}
 function finalReview(original, input, requireExplanation = true) {
-    const criteria = input.criteria ?? original.criteria;
+    const kind = kindOf(original.scorecard);
+    const { criteria, notes: criteriaNotes } = reviewedCriteria(kind, input, original);
     const reviewNote = input.review_note ?? '';
     if (requireExplanation && canonical(criteria) !== canonical(original.criteria) && !reviewNote) {
         throw new ReviewError('review_note required when changing criteria', 400);
@@ -76,13 +115,19 @@ function finalReview(original, input, requireExplanation = true) {
     const aiReview = validateAiReview(input.ai_review, original, true);
     return {
         ...(original.run_id || input.ai_review ? { ai_review: aiReview } : {}),
+        ...(kind === 'm10'
+            ? {}
+            : {
+                scorecard: kind,
+                critical_violation: calculateQaV2Score(kind, criteria).criticalViolation,
+            }),
         criteria,
-        score: calculateM10Score(criteria),
+        score: scoreFor(kind, criteria),
         language: original.language,
         summary: input.summary ?? original.summary,
         strengths: input.strengths ?? original.strengths,
         improvements: input.improvements ?? original.improvements,
-        criteria_notes: Object.fromEntries(Object.entries(input.criteria_notes ?? {}).filter(([, value]) => value !== '')),
+        criteria_notes: Object.fromEntries(Object.entries(criteriaNotes).filter(([, value]) => value !== '')),
         review_note: reviewNote,
     };
 }
@@ -184,12 +229,15 @@ export class ScorecardReviewService {
             const original = snapshot(draft, this.db);
             const final = finalReview(original, input);
             const id = nanoid(12);
+            const metadata = final.scorecard
+                ? { scorecard: final.scorecard, critical_violation: final.critical_violation }
+                : {};
             this.db
                 .prepare(`INSERT INTO evaluations
         (id,agent_id,upload_id,transcription_id,source_text,score,criteria_json,criteria_notes_json,
-         summary,strengths_json,improvements_json,type,status,evaluator_id,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'completed',?,?)`)
-                .run(id, draft.agent_id, draft.upload_id, draft.transcription_id, draft.source_text, final.score, JSON.stringify(final.criteria), JSON.stringify(final.criteria_notes), final.summary, JSON.stringify(final.strengths), JSON.stringify(final.improvements), draft.type, actor.id, Date.now());
+         source_metadata_json,summary,strengths_json,improvements_json,type,status,evaluator_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'completed',?,?)`)
+                .run(id, draft.agent_id, draft.upload_id, draft.transcription_id, draft.source_text, final.score, JSON.stringify(final.criteria), JSON.stringify(final.criteria_notes), JSON.stringify(metadata), final.summary, JSON.stringify(final.strengths), JSON.stringify(final.improvements), draft.type, actor.id, Date.now());
             recordAiReview(this.db, id, original, final, actor.id);
             const result = {
                 id,

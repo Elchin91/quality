@@ -1,6 +1,31 @@
 import { evaluateConversation } from '../aiEvaluation/evaluator.js';
 import { safeEvaluationError } from '../aiEvaluation/errors.js';
 import { careQuery, fail, invalidateRunningDraft, insertEvent, nowFrom, ownedTask, runImmediate, task, transcriptForAi, } from './serviceSupport.js';
+/** A stored chat draft is current only when it was produced for the chat_v2 checklist. */
+export function isCurrentChatDraft(draft) {
+    return (typeof draft === 'object' &&
+        draft !== null &&
+        draft.scorecard === 'chat_v2');
+}
+function parsedDraft(draftJson) {
+    if (!draftJson)
+        return null;
+    try {
+        return JSON.parse(draftJson);
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Client-facing draft status, derived at read time (stored values are unchanged): a succeeded
+ * draft built for another checklist (M10) is reported as stale.
+ */
+export function chatAiDraftStatus(status, draftJson) {
+    if (status !== 'succeeded' || !draftJson)
+        return status;
+    return isCurrentChatDraft(parsedDraft(draftJson)) ? status : 'stale';
+}
 export async function generateAiDraft(input) {
     input.signal?.throwIfAborted();
     const generation = runImmediate(input.db, () => {
@@ -37,6 +62,7 @@ export async function generateAiDraft(input) {
         const result = await evaluateConversation({
             db: input.db,
             signal: input.signal,
+            scorecard: 'chat_v2',
             beforePersist: () => {
                 input.signal?.throwIfAborted();
                 const current = task(input.db, input.taskId);

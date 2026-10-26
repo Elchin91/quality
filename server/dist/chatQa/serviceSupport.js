@@ -1,18 +1,12 @@
 import { nanoid } from 'nanoid';
+import { SCORECARD_CRITERIA } from '../prompts/scorecard.js';
+import { qaV2Criteria } from '../prompts/qaV2Scorecard.js';
+import { parseCriteriaFor } from '../prompts/scorecardRegistry.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 import { effectiveTranscriptJson } from './retention.js';
 const APPROVED_CHANNELS = new Set(['whatsapp', 'telegram', 'm10 instagram', 'm10 facebook']);
-const BASE_CRITERIA = [
-    'instruction_compliance',
-    'willingness_to_help',
-    'problem_solving',
-    'empathy',
-    'proactivity',
-    'effective_communication',
-    'patience',
-    'tone_of_voice',
-];
-const ALL_CRITERIA = new Set([...BASE_CRITERIA, 'risk_management']);
+const M10_CRITERION_KEYS = new Set(SCORECARD_CRITERIA.map((c) => c.key));
+const CHAT_V2_KEYS = new Set(qaV2Criteria('chat_v2').map((c) => c.key));
 export class ChatQaServiceError extends Error {
     code;
     httpStatus;
@@ -256,28 +250,29 @@ export function notify(db, createId, recipient, type, taskId, now) {
         now,
     });
 }
+/** Completion accepts only chat_v2: an M10 body is a stale form, anything else malformed is invalid. */
 export function validatedCriteria(value) {
-    for (const key of BASE_CRITERIA) {
-        const score = value[key];
-        if (typeof score !== 'number' || !Number.isInteger(score) || score < 0 || score > 4)
-            fail('invalid_input', 400);
+    if (Object.keys(value).some((key) => M10_CRITERION_KEYS.has(key)))
+        fail('scorecard_version_mismatch', 400);
+    try {
+        return parseCriteriaFor('chat_v2', value);
     }
-    const risk = value.risk_management;
-    if (risk !== null &&
-        (typeof risk !== 'number' || !Number.isInteger(risk) || risk < 0 || risk > 4))
+    catch {
         fail('invalid_input', 400);
-    if (Object.keys(value).some((key) => !ALL_CRITERIA.has(key)))
-        fail('invalid_input', 400);
-    return value;
+    }
 }
-export function validatedNotes(notes) {
+/** Trimmed notes for chat_v2 keys; every thumbs-down criterion must carry a note. */
+export function validatedNotes(notes, criteria) {
     const result = {};
     for (const [key, note] of Object.entries(notes)) {
-        if (!ALL_CRITERIA.has(key) || typeof note !== 'string' || note.length > 2_000)
+        if (!CHAT_V2_KEYS.has(key) || typeof note !== 'string' || note.length > 2_000)
             fail('invalid_input', 400);
         const trimmed = note.trim();
         if (trimmed)
             result[key] = trimmed;
     }
+    for (const [key, value] of Object.entries(criteria))
+        if (value === 0 && !result[key])
+            fail('invalid_input', 400);
     return result;
 }

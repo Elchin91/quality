@@ -8,6 +8,7 @@ import { callSourceItems } from '../aiEvaluation/source.js';
 import { createAiEvaluationSchema, readRunFields, readRunMetadata, } from '../aiEvaluation/persistence.js';
 import { toScorecardLanguage } from '../lang.js';
 import { scoreShape } from '../prompts/scorecard.js';
+import { qaV2ScoreShape } from '../prompts/qaV2Scorecard.js';
 import { captureRuntimeInput, requireDatabase, requireIdentifier } from './runtimeInput.js';
 import { CallQaServiceError } from './errors.js';
 import { validateAudioQuality } from './transcriptionValidation.js';
@@ -69,7 +70,7 @@ export async function generateCallQaAiDraft(input) {
     let sourceVersion;
     try {
         sourceVersion = requireDraftOwner(db, taskId, reviewerId);
-        // The AI reviewer is trained on the M10 checklist only; Telesales reviews stay manual.
+        // Standard calls are drafted on call_v2; Telesales reviews stay manual.
         if (db.prepare('SELECT scorecard_kind FROM call_qa_tasks WHERE id=?').get(taskId)?.scorecard_kind === 'telesales')
             fail('task_state_conflict');
         transcriptRow = readTranscript(db, taskId, reviewerId);
@@ -96,6 +97,7 @@ export async function generateCallQaAiDraft(input) {
             db,
             signal,
             language: toScorecardLanguage(transcriptRow.language),
+            scorecard: 'call_v2',
             source: {
                 identity: `call-task:${taskId}:transcription:${transcriptRow.id}`,
                 revision: revision(transcriptRow),
@@ -123,7 +125,7 @@ export async function generateCallQaAiDraft(input) {
                             language: captured.language,
                             strengths: captured.strengths,
                             improvements: captured.improvements,
-                        });
+                        }, 'call_v2');
                 }
                 return result;
             },
@@ -134,7 +136,7 @@ export async function generateCallQaAiDraft(input) {
             throw error;
         fail('ai_generation_failed', 502);
     }
-    const draft = validateAiDraft(raw);
+    const draft = validateAiDraft(raw, 'call_v2');
     try {
         const currentSource = readTranscript(db, taskId, reviewerId);
         if (requireDraftOwner(db, taskId, reviewerId) !== sourceVersion ||
@@ -153,7 +155,7 @@ export async function generateCallQaAiDraft(input) {
         .run(draft.run_id, taskId, reviewerId, generation.generation).changes;
     if (changed !== 1)
         fail('task_state_conflict');
-    return draft;
+    return { ...draft, ai_draft_status: callAiDraftStatus(db, draft.run_id) };
 }
 export function currentCallRun(db, taskId, reviewerId) {
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='ai_evaluation_heads'").get())
@@ -171,20 +173,39 @@ export function currentCallRun(db, taskId, reviewerId) {
         return null;
     return readRunFields(db, head.run_id);
 }
+/** Call AI drafts are current only when their run was produced for the call_v2 checklist. */
+export function isCurrentCallRun(db, runId) {
+    if (!runId)
+        return false;
+    try {
+        return readRunMetadata(db, runId).scorecard === 'call_v2';
+    }
+    catch {
+        return false;
+    }
+}
+/** Read-time status of a persisted draft; runs from an older checklist (M10) are stale. */
+export function callAiDraftStatus(db, runId) {
+    return isCurrentCallRun(db, runId) ? 'succeeded' : 'stale';
+}
 export function getCallQaAiDraft(db, taskId, reviewerId) {
     requireDraftOwner(db, taskId, reviewerId);
     const fields = currentCallRun(db, taskId, reviewerId);
     if (!fields?.run_id)
         return null;
+    const metadata = readRunMetadata(db, fields.run_id);
+    // Runs from before the call_v2 cutover stay readable as M10 drafts (reported stale).
+    const kind = metadata.scorecard === 'call_v2' ? 'call_v2' : 'm10';
     return validateAiDraft({
-        ...scoreShape.parse(readRunMetadata(db, fields.run_id).original_ai_result),
+        ...(kind === 'call_v2' ? qaV2ScoreShape('call_v2') : scoreShape).parse(metadata.original_ai_result),
         ...fields,
-    });
+    }, kind);
 }
 /** Same retained source and canonical indices used by the evaluator; never returns storage paths. */
 export function getCallQaReviewSource(db, taskId, reviewerId) {
     requireDraftOwner(db, taskId, reviewerId);
     const row = readTranscript(db, taskId, reviewerId);
+    const draft = getCallQaAiDraft(db, taskId, reviewerId);
     let quality = null;
     if (row?.quality_json && typeof row.duration === 'number') {
         try {
@@ -199,7 +220,8 @@ export function getCallQaReviewSource(db, taskId, reviewerId) {
         items: row?.transcript
             ? callSourceItems(row.text, row.segments_json, row.speaker_roles_json, row.confirmed_segments_json)
             : [],
-        draft: getCallQaAiDraft(db, taskId, reviewerId),
+        draft,
+        ai_draft_status: draft ? callAiDraftStatus(db, draft.run_id) : null,
         quality,
         quality_profile: row?.quality_profile ?? 'baseline',
         transcript_text: row?.text ?? null,

@@ -2,7 +2,8 @@ import { AiReviewError, validateAiReview } from '../aiEvaluation/review.js';
 import { isUnusable } from '../qaUnusable/unusable.js';
 import { captureContactContext } from '../contactContext/context.js';
 import { recordAiReview } from '../aiEvaluation/persistence.js';
-import { calculateM10Score } from '../prompts/scorecard.js';
+import { calculateQaV2Score } from '../prompts/qaV2Scorecard.js';
+import { isCurrentChatDraft } from './aiDraft.js';
 import { operatorChannelCapacity, operatorMonthlyCapacity, quotaFor, } from '../qaAutomation/quota.js';
 import { enqueueQaRefill } from '../jobs/qaRefill.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
@@ -149,7 +150,8 @@ export function createAutomaticTask(input) {
 export { generateAiDraft } from './aiDraft.js';
 export function completeTask(input) {
     const criteria = validatedCriteria(input.criteria);
-    const notes = validatedNotes(input.criteriaNotes);
+    const notes = validatedNotes(input.criteriaNotes, criteria);
+    const { score, criticalViolation } = calculateQaV2Score('chat_v2', criteria);
     const overallNote = boundedText(input.overallNote, 8_000);
     return runImmediate(input.db, () => {
         const current = ownedTask(input.db, input.taskId, input.reviewerUserId);
@@ -159,6 +161,8 @@ export function completeTask(input) {
             ? JSON.parse(current.ai_draft_json)
             : null;
         const aiReview = validateAiReview(input.aiReview, selectedDraft);
+        if (aiReview.mode === 'ai' && !isCurrentChatDraft(selectedDraft))
+            fail('ai_draft_stale', 409);
         const interaction = input.db
             .prepare('SELECT * FROM source_interactions WHERE id=? AND transcript_json IS NOT NULL')
             .get(current.interaction_id);
@@ -180,13 +184,15 @@ export function completeTask(input) {
                 customer: interaction.client_message_count,
                 agent: interaction.agent_message_count,
             },
+            scorecard: 'chat_v2',
+            critical_violation: criticalViolation,
         };
         input.db
             .prepare(`INSERT INTO evaluations
       (id,agent_id,upload_id,transcription_id,source_text,score,criteria_json,criteria_notes_json,
        source_metadata_json,source_ref,summary,strengths_json,improvements_json,type,status,evaluator_id,created_at)
       VALUES (?,?,NULL,NULL,NULL,?,?,?,?,?,?,'[]','[]','chat','completed',?,?)`)
-            .run(evaluationId, current.agent_id, calculateM10Score(criteria), JSON.stringify(criteria), JSON.stringify(notes), JSON.stringify(metadata), `chat-qa:${interaction.id}`, overallNote, input.reviewerUserId, nowMs);
+            .run(evaluationId, current.agent_id, score, JSON.stringify(criteria), JSON.stringify(notes), JSON.stringify(metadata), `chat-qa:${interaction.id}`, overallNote, input.reviewerUserId, nowMs);
         if (aiReview.mode === 'ai')
             recordAiReview(input.db, evaluationId, selectedDraft, {
                 ai_review: aiReview,
@@ -194,7 +200,7 @@ export function completeTask(input) {
                 criteria,
                 criteria_notes: notes,
                 summary: overallNote,
-                score: calculateM10Score(criteria),
+                score,
             }, input.reviewerUserId);
         const changed = input.db
             .prepare("UPDATE chat_qa_tasks SET status='completed',evaluation_id=?,completed_at=?,updated_at=? WHERE id=? AND reviewer_user_id=? AND status='in_progress'")

@@ -13,18 +13,11 @@ const leadDecisionSchema = z.object({
     decision: z.enum(['approve', 'reject']),
     note: z.string().trim().max(4000).nullable().optional(),
 });
-const value = z.number().min(0).max(4);
-const criteriaSchema = z.object({
-    instruction_compliance: value,
-    willingness_to_help: value,
-    problem_solving: value,
-    empathy: value,
-    proactivity: value,
-    effective_communication: value,
-    patience: value,
-    risk_management: value.nullable(),
-    tone_of_voice: value,
-});
+// Criteria are validated against the original evaluation's checklist in the service
+// (M10 / Telesales 0–4, chat_v2 / call_v2 thumbs); the route only bounds the shape.
+const criteriaSchema = z
+    .record(z.string().max(64), z.number().finite().nullable())
+    .refine((value) => Object.keys(value).length <= 32);
 const reviewSchema = z.object({
     criteria: criteriaSchema,
     note: z.string().trim().min(1).max(4000),

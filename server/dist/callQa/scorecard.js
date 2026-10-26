@@ -1,12 +1,12 @@
 import { AiReviewError, validateAiReview } from '../aiEvaluation/review.js';
 import { readAiReview } from '../aiEvaluation/persistence.js';
 import { nanoid } from 'nanoid';
-import { calculateM10Score } from '../prompts/scorecard.js';
+import { calculateQaV2Score } from '../prompts/qaV2Scorecard.js';
 import { calculateTelesalesScore } from '../prompts/telesalesScorecard.js';
 import { recordAiReview } from '../aiEvaluation/persistence.js';
 import { captureRuntimeInput, requireDatabase, requireIdentifier, requirePositiveVersion, } from './runtimeInput.js';
-import { fail, invalidInput, safeText, validateCallQaCriteria, validateCallQaNotes, validateTelesalesCriteria, } from './scorecardValidation.js';
-import { currentCallRun } from './aiDraft.js';
+import { fail, invalidInput, hasM10CriteriaKeys, safeText, validateCallQaCriteria, validateCallQaNotes, validateCallV2Criteria, validateCallV2Notes, validateTelesalesCriteria, } from './scorecardValidation.js';
+import { currentCallRun, isCurrentCallRun } from './aiDraft.js';
 export { validateCallQaCriteria, validateCallQaNotes } from './scorecardValidation.js';
 export { generateCallQaAiDraft, getCallQaAiDraft, } from './aiDraft.js';
 import { withCallQaCompletionAuthorization } from './completionSchema.js';
@@ -127,11 +127,28 @@ export function completeCallQaTask(input) {
     const reviewerId = requireIdentifier(values.reviewerUserId, invalidInput);
     const expectedVersion = requirePositiveVersion(values.expectedVersion, invalidInput);
     // The checklist belongs to the task; validate the submitted criteria against that checklist.
+    // A standard ('m10') task is completed on call_v2; Telesales keeps its own 0–4 checklist.
     const kind = db.prepare('SELECT scorecard_kind FROM call_qa_tasks WHERE id=?').get(taskId)?.scorecard_kind ?? 'm10';
-    const criteria = kind === 'telesales'
-        ? validateTelesalesCriteria(values.criteria)
-        : validateCallQaCriteria(values.criteria);
-    const notes = validateCallQaNotes(values.criteriaNotes, kind);
+    let criteria;
+    let notes;
+    // An M10 body on a standard task is only accepted as an idempotent replay of a completion made
+    // before the cutover; anything else is a stale form (checked inside the transaction).
+    let legacyReplayOnly = false;
+    if (kind === 'telesales') {
+        criteria = validateTelesalesCriteria(values.criteria);
+        notes = validateCallQaNotes(values.criteriaNotes, kind);
+    }
+    else if (hasM10CriteriaKeys(values.criteria)) {
+        const versionMismatch = () => fail('scorecard_version_mismatch', 400);
+        criteria = validateCallQaCriteria(values.criteria, versionMismatch);
+        notes = validateCallQaNotes(values.criteriaNotes);
+        legacyReplayOnly = true;
+    }
+    else {
+        const thumbs = validateCallV2Criteria(values.criteria);
+        criteria = thumbs;
+        notes = validateCallV2Notes(values.criteriaNotes, thumbs);
+    }
     const overallNote = safeText(values.overallNote, 8_000, invalidInput);
     const timestamp = now(values.clock);
     const idFactory = values.createId;
@@ -143,9 +160,13 @@ export function completeCallQaTask(input) {
             fail('completion_conflict');
         const criteriaJson = JSON.stringify(criteria);
         const notesJson = JSON.stringify(notes);
+        // A legacy M10 body that does not replay the stored completion exactly is a stale form.
+        const replayFail = (code) => legacyReplayOnly ? fail('scorecard_version_mismatch', 400) : fail(code);
+        if (legacyReplayOnly && current.status !== 'completed')
+            fail('scorecard_version_mismatch', 400);
         if (current.status === 'completed') {
             if (current.version !== expectedVersion + 1 || !current.evaluation_id)
-                fail('version_conflict');
+                replayFail('version_conflict');
             const evaluation = db
                 .prepare('SELECT * FROM evaluations WHERE id=?')
                 .get(current.evaluation_id);
@@ -156,12 +177,12 @@ export function completeCallQaTask(input) {
                 evaluation.type !== 'call' ||
                 evaluation.evaluator_id !== reviewerId ||
                 evaluation.source_ref !== `call-qa:${current.source_record_id}`)
-                fail('completion_conflict');
+                replayFail('completion_conflict');
             const previous = readAiReview(db, current.evaluation_id);
             const replayDecision = validateAiReview(values.aiReview, previous ? { run_id: previous.run_id, warnings: previous.original_ai.warnings } : null);
             if (JSON.stringify(replayDecision) !==
                 JSON.stringify(previous?.final_review.ai_review ?? { mode: 'manual' }))
-                fail('completion_conflict');
+                replayFail('completion_conflict');
             return completionResult(current, evaluation, criteria, notes, overallNote);
         }
         if (current.status !== 'in_progress')
@@ -185,9 +206,13 @@ export function completeCallQaTask(input) {
         const queue = current.queue_label === null
             ? null
             : safeText(current.queue_label, 1_000, () => fail('source_ineligible'));
-        // The AI reviewer only knows the M10 checklist; Telesales reviews are always manual.
+        // Telesales reviews are always manual.
         const aiFields = kind === 'telesales' ? null : currentCallRun(db, taskId, reviewerId);
         const aiReview = validateAiReview(values.aiReview, aiFields);
+        // A draft generated for an older checklist (M10) cannot be approved on call_v2.
+        if (aiReview.mode === 'ai' && !isCurrentCallRun(db, aiFields?.run_id))
+            fail('ai_draft_stale', 409);
+        const v2 = kind === 'telesales' ? null : calculateQaV2Score('call_v2', criteria);
         const evaluationId = createId(idFactory);
         const metadata = {
             source: 'call_qa',
@@ -199,9 +224,11 @@ export function completeCallQaTask(input) {
             direction,
             queue,
             task_id: current.id,
-            ...(kind === 'telesales' ? { scorecard: 'telesales' } : {}),
+            ...(v2
+                ? { scorecard: 'call_v2', critical_violation: v2.criticalViolation }
+                : { scorecard: 'telesales' }),
         };
-        const score = kind === 'telesales' ? calculateTelesalesScore(criteria) : calculateM10Score(criteria);
+        const score = v2 ? v2.score : calculateTelesalesScore(criteria);
         db.prepare(`INSERT INTO evaluations
         (id,agent_id,upload_id,transcription_id,source_text,score,criteria_json,
          criteria_notes_json,source_metadata_json,source_ref,summary,strengths_json,

@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { criteriaShape, calculateM10Score } from '../prompts/scorecard.js';
+import { parseCriteriaFor, scoreFor } from '../prompts/scorecardRegistry.js';
 import { aiReviewShape } from './review.js';
+import { isAiScorecardKind } from './scorecards.js';
+import { criterionKey } from './types.js';
 export const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value
@@ -10,12 +12,33 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const count = z.number().finite().nonnegative();
 const identifier = z.string().min(1).max(512);
 const language = z.enum(['az', 'ru', 'en', 'mixed']);
+const AI_KINDS = ['m10', 'chat_v2', 'call_v2'];
+/**
+ * Criteria are parsed by their checklist: the declared `scorecard`, else whichever checklist the
+ * keys match (the key sets are disjoint, so the match is unambiguous). M10 facts keep their shape.
+ */
+function parsedCriteria(facts) {
+    const kinds = isAiScorecardKind(facts.scorecard) ? [facts.scorecard] : AI_KINDS;
+    for (const kind of kinds) {
+        try {
+            return { kind, criteria: parseCriteriaFor(kind, facts.criteria) };
+        }
+        catch {
+            /* try the next checklist */
+        }
+    }
+    return null;
+}
 export function scoreFacts(value) {
-    const facts = record(value), parsed = criteriaShape.safeParse(facts.criteria), lang = language.safeParse(facts.language);
+    const facts = record(value), parsed = parsedCriteria(facts), lang = language.safeParse(facts.language);
     const scalar = z.number().finite().min(0).max(100).safeParse(facts.score);
     return {
-        ...(parsed.success
-            ? { criteria: parsed.data, score: calculateM10Score(parsed.data) }
+        ...(parsed
+            ? {
+                criteria: parsed.criteria,
+                score: scoreFor(parsed.kind, parsed.criteria),
+                ...(parsed.kind === 'm10' ? {} : { scorecard: parsed.kind }),
+            }
             : scalar.success
                 ? { score: scalar.data }
                 : {}),
@@ -44,6 +67,7 @@ const passShape = z.object({
     duration_ms: count.optional(),
 });
 const metadataShape = z.object({
+    scorecard: z.enum(['m10', 'chat_v2', 'call_v2']).optional(),
     source_identity: identifier.optional(),
     source_revision: identifier.nullable().optional(),
     source_kind: z.enum(['chat', 'call']).optional(),
@@ -81,19 +105,7 @@ const warning = z.object({
         'provider_metadata_unavailable',
         'source_evidence_unavailable',
     ]),
-    criterion: z
-        .enum([
-        'instruction_compliance',
-        'willingness_to_help',
-        'problem_solving',
-        'empathy',
-        'proactivity',
-        'effective_communication',
-        'patience',
-        'risk_management',
-        'tone_of_voice',
-    ])
-        .optional(),
+    criterion: criterionKey.optional(),
 });
 /** Invalid individual legacy facts are omitted rather than copied as arbitrary JSON. */
 function picked(schema, input) {

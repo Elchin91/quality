@@ -4,7 +4,7 @@ const APPROVED_CALLS_ORIGIN = 'https://calls.pashapay.az';
 const DEFAULT_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 const JSON_OVERHEAD_BYTES = 1_024;
 const ATTACHMENT_OBJECT_KEY = /^(?:message\/[A-Za-z0-9_-]{1,64}(?:\/[A-Za-z0-9_-]{1,128})?|chat\/[A-Za-z0-9_-]{1,128})$/u;
-const EXTENSION = /^[a-z0-9]{1,16}$/u;
+const EXTENSION = /^[A-Za-z0-9]{1,16}$/u;
 export class ChatAttachmentError extends Error {
     code;
     constructor(code) {

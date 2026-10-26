@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { metadataDimensionSql } from '../effectiveEvaluations.js';
+import { parseScorecardFilter } from './scorecardFilter.js';
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const dimension = (value) => {
     const values = Array.isArray(value) ? value : value == null ? [] : [value];
@@ -34,6 +35,7 @@ export function parseAnalyticsFilters(query) {
         reviewers: dimension(query.reviewer),
         classifiers: dimension(query.classifier),
         bucket,
+        scorecard: parseScorecardFilter(query.scorecard),
     };
 }
 export function buildAnalyticsWhere(filters, previous = false) {

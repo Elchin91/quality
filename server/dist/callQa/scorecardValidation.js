@@ -1,9 +1,12 @@
 import { SCORECARD_CRITERIA, scoreShape } from '../prompts/scorecard.js';
 import { TELESALES_CRITERION_KEYS, } from '../prompts/telesalesScorecard.js';
+import { qaV2Criteria, qaV2ScoreShape } from '../prompts/qaV2Scorecard.js';
+import { parseCriteriaFor } from '../prompts/scorecardRegistry.js';
 import { evaluationMetadataShape } from '../aiEvaluation/types.js';
 import { captureRuntimeInput, isSafeAuditText } from './runtimeInput.js';
 import { CallQaServiceError } from './errors.js';
 const criterionKeys = SCORECARD_CRITERIA.map(({ key }) => key);
+const callV2Keys = qaV2Criteria('call_v2').map(({ key }) => key);
 const trim = String.prototype.trim;
 export function fail(code, status = 409) {
     throw new CallQaServiceError(code, status);
@@ -45,6 +48,54 @@ export function validateTelesalesCriteria(value, reject = invalidInput) {
         else
             return reject();
     }
+    return result;
+}
+/** True when the body carries any M10 criterion key (a form made for the pre-cutover checklist). */
+export function hasM10CriteriaKeys(value) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value))
+        return false;
+    try {
+        return criterionKeys.some((key) => Object.hasOwn(value, key));
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * Standard calls are completed on call_v2: every criterion is required and is 1 (thumbs-up) or
+ * 0 (thumbs-down). A body carrying any M10 criterion is a stale client → scorecard_version_mismatch.
+ */
+export function validateCallV2Criteria(value) {
+    const captured = captureRuntimeInput(value, [], [...callV2Keys, ...criterionKeys], invalidInput);
+    if (criterionKeys.some((key) => Object.hasOwn(captured, key)))
+        fail('scorecard_version_mismatch', 400);
+    try {
+        return parseCriteriaFor('call_v2', captured);
+    }
+    catch {
+        return invalidInput();
+    }
+}
+/** Trimmed call_v2 notes; every thumbs-down criterion must carry a non-blank note. */
+export function validateCallV2Notes(value, criteria) {
+    const captured = captureRuntimeInput(value, [], callV2Keys, invalidInput);
+    const result = {};
+    for (const key of callV2Keys) {
+        const note = captured[key];
+        if (note === undefined)
+            continue;
+        if (typeof note !== 'string')
+            return invalidInput();
+        const normalized = trim.call(note);
+        if (!normalized)
+            continue;
+        if (!isSafeAuditText(normalized, 2_000))
+            return invalidInput();
+        result[key] = normalized;
+    }
+    for (const key of callV2Keys)
+        if (criteria[key] === 0 && !result[key])
+            return invalidInput();
     return result;
 }
 export function validateCallQaNotes(value, kind = 'm10') {
@@ -90,8 +141,23 @@ function safeStringArray(value, reject) {
     }
     return result;
 }
-export function validateAiDraft(value) {
+/** call_v2 AI criteria: every key, 1 or 0 only; anything else is an invalid AI scorecard. */
+function validateAiCallV2Criteria(value) {
+    const captured = captureRuntimeInput(value, callV2Keys, [], invalidAi);
+    try {
+        return parseCriteriaFor('call_v2', captured);
+    }
+    catch {
+        return invalidAi();
+    }
+}
+/**
+ * Validates an AI call draft for its checklist: new drafts are call_v2; runs produced before the
+ * cutover are read back as M10 (and reported stale by the caller).
+ */
+export function validateAiDraft(value, kind = 'call_v2') {
     const captured = captureRuntimeInput(value, ['criteria', 'summary'], [
+        'scorecard',
         'language',
         'strengths',
         'improvements',
@@ -102,18 +168,21 @@ export function validateAiDraft(value) {
         'run_details',
     ], invalidAi);
     const candidate = {
-        criteria: validateCallQaCriteria(captured.criteria, invalidAi),
+        criteria: kind === 'call_v2'
+            ? validateAiCallV2Criteria(captured.criteria)
+            : validateCallQaCriteria(captured.criteria, invalidAi),
         language: captured.language,
         summary: safeText(captured.summary, 8_000, invalidAi),
         strengths: safeStringArray(captured.strengths, invalidAi),
         improvements: safeStringArray(captured.improvements, invalidAi),
     };
     try {
-        const parsed = scoreShape.safeParse(candidate);
+        const parsed = (kind === 'call_v2' ? qaV2ScoreShape('call_v2') : scoreShape).safeParse(candidate);
         if (!parsed.success)
             return invalidAi();
         return {
             ...parsed.data,
+            scorecard: kind,
             ...evaluationMetadataShape.partial().parse({
                 run_id: captured.run_id,
                 warnings: captured.warnings,

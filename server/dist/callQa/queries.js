@@ -14,7 +14,7 @@ const REVIEWER_VIEW_COLUMNS = `
   tasks.completed_at_utc,tasks.cancelled_at_utc,tasks.deadline_at_utc,
   agents.name AS agent_name,records.call_started_at_utc,
   records.call_ended_at_utc,records.baku_date,records.duration_seconds,
-  records.caller_last_four,records.direction,records.queue_label,
+  records.caller_last_four,records.caller_number,records.direction,records.queue_label,
   CASE WHEN records.recording_status = 'ready' AND uploads.id IS NOT NULL
     AND uploads.type = 'call' AND uploads.size = records.recording_size_bytes
     AND uploads.mime IS records.recording_mime_type THEN 1 ELSE 0 END AS recording_available`;
@@ -85,6 +85,9 @@ function taskView(row) {
             callerLastFour: row.caller_last_four !== null && /^\d{4}$/u.test(row.caller_last_four)
                 ? row.caller_last_four
                 : null,
+            callerNumber: row.caller_number !== null && /^\d{7,15}$/u.test(row.caller_number)
+                ? row.caller_number
+                : null,
             direction: safeLabel(row.direction),
             queueLabel: safeLabel(row.queue_label),
         },
@@ -104,20 +107,39 @@ function statusClause(status) {
         ? { sql: '', params: [] }
         : { sql: ' AND tasks.status = ?', params: [status] };
 }
+/** Matches the admin catalog: digit substring of the full number, or of the last four. */
+function customerNumberClause(customerNumber) {
+    if (customerNumber === undefined)
+        return { sql: '', params: [] };
+    if (typeof customerNumber !== 'string' || !/^\d{1,15}$/u.test(customerNumber))
+        invalidInput();
+    if (customerNumber.length > 4) {
+        return {
+            sql: " AND instr(COALESCE(records.caller_number,''),?) > 0",
+            params: [customerNumber],
+        };
+    }
+    return {
+        sql: ` AND (instr(COALESCE(records.caller_number,''),?) > 0
+      OR instr(COALESCE(records.caller_last_four,''),?) > 0)`,
+        params: [customerNumber, customerNumber],
+    };
+}
 /** Reviewer ownership and active-role authorization are applied by both SQL statements. */
 export function listReviewerCallQaTasks(db, query) {
-    const values = captureRuntimeInput(query, ['reviewerUserId', 'page', 'pageSize'], ['status'], invalidInput);
+    const values = captureRuntimeInput(query, ['reviewerUserId', 'page', 'pageSize'], ['status', 'customerNumber'], invalidInput);
     const database = requireDatabase(db, invalidInput);
     validatePage(values);
     const reviewerUserId = requireIdentifier(values.reviewerUserId, invalidInput);
     const page = values.page;
     const pageSize = values.pageSize;
     const status = statusClause(values.status);
+    const number = customerNumberClause(values.customerNumber);
     const ownership = `
     WHERE tasks.reviewer_user_id = ? AND reviewers.id = ?
       AND reviewers.role = 'reviewer' AND reviewers.active = 1
-      AND reviewers.must_change_password = 0${status.sql}`;
-    const parameters = [reviewerUserId, reviewerUserId, ...status.params];
+      AND reviewers.must_change_password = 0${status.sql}${number.sql}`;
+    const parameters = [reviewerUserId, reviewerUserId, ...status.params, ...number.params];
     const total = database
         .prepare(`SELECT COUNT(*) AS count ${VIEW_JOINS} ${ownership}`)
         .get(...parameters);

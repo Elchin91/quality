@@ -17,6 +17,7 @@ const reviewSourceShape = z.object({
         .optional(),
     items: z.array(sourceItem),
     draft: evaluatedScoreShape.nullable(),
+    ai_draft_status: z.enum(['succeeded', 'stale']).nullable().optional(),
     quality_profile: z.enum(['baseline', 'pilot']).optional(),
     transcript_text: z.string().max(500_000).nullable().optional(),
     refined_text: z.string().max(500_000).nullable().optional(),

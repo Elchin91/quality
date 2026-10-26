@@ -1,3 +1,4 @@
+import { qaV2Criteria } from './qaV2Scorecard.js';
 /** Telesales checklist (sheet "Meyarlar"): six criteria scored 0–4, total = sum × 100 / 24. */
 export const TELESALES_CRITERIA = [
     { key: 'telesales_instructions', label: 'Təlimatlara riayət' },
@@ -17,15 +18,47 @@ export function calculateTelesalesScore(criteria) {
     }, 0);
     return Math.min(100, (sum * 100) / MAX_TOTAL);
 }
-/** Evaluations record their checklist in source metadata; anything else is the M10 checklist. */
-export function evaluationScorecardKind(metadataJson) {
-    if (!metadataJson)
-        return 'm10';
-    try {
-        const metadata = JSON.parse(metadataJson);
-        return metadata?.scorecard === 'telesales' ? 'telesales' : 'm10';
+const INFERRED_KINDS = [
+    ['chat_v2', new Set(qaV2Criteria('chat_v2').map(({ key }) => key))],
+    ['call_v2', new Set(qaV2Criteria('call_v2').map(({ key }) => key))],
+    ['telesales', new Set(TELESALES_CRITERION_KEYS)],
+];
+function criteriaObject(criteria) {
+    let value = criteria;
+    if (typeof value === 'string') {
+        try {
+            value = JSON.parse(value);
+        }
+        catch {
+            return null;
+        }
     }
-    catch {
-        return 'm10';
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? value
+        : null;
+}
+/**
+ * Checklist of a stored evaluation: the declared `source_metadata.scorecard` (chat_v2, call_v2,
+ * telesales) wins; otherwise, when the criteria (object or JSON) have at least one key and every
+ * key belongs to exactly one checklist's key set, that checklist; otherwise legacy M10.
+ * Same rule as the web `evaluationScorecardKind` and SQL `scorecardKindSql`.
+ */
+export function evaluationScorecardKind(metadataJson, criteria) {
+    if (metadataJson) {
+        try {
+            const metadata = JSON.parse(metadataJson);
+            const scorecard = metadata?.scorecard;
+            if (scorecard === 'telesales' || scorecard === 'chat_v2' || scorecard === 'call_v2')
+                return scorecard;
+        }
+        catch {
+            // Malformed metadata declares nothing; fall through to the criteria keys.
+        }
     }
+    const object = criteriaObject(criteria);
+    const keys = object ? Object.keys(object) : [];
+    if (!keys.length)
+        return 'm10';
+    const matches = INFERRED_KINDS.filter(([, own]) => keys.every((key) => own.has(key)));
+    return matches.length === 1 ? matches[0][0] : 'm10';
 }

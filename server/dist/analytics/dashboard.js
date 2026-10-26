@@ -1,6 +1,7 @@
-import { SCORECARD_CRITERIA } from '../prompts/scorecard.js';
+import { criteriaKeysFor, isQaV2Kind } from '../prompts/scorecardRegistry.js';
 import { buildEffectiveEvaluationWhere, businessDateSql, effectiveCriteriaSql, effectiveScoreSql, } from '../effectiveEvaluations.js';
 import { periodKey } from './filters.js';
+import { andWhere, hasCriticalViolation, SCORECARD_KIND_ORDER, scorecardFilterSql, scorecardKindSql, toScorecardKind, } from './scorecardFilter.js';
 const UNKNOWN = '__unknown__';
 const round = (value) => +value.toFixed(2);
 const average = (rows) => rows.length ? round(rows.reduce((sum, row) => sum + row.score, 0) / rows.length) : null;
@@ -39,16 +40,69 @@ function loadRows(database, filters, previous = false) {
         : '';
     const score = hasAppeals ? effectiveScoreSql() : 'e.score';
     const criteria = hasAppeals ? effectiveCriteriaSql() : 'e.criteria_json';
-    return database
+    const whereSql = andWhere(where.sql, scorecardFilterSql(filters.scorecard, 'e', criteria));
+    const rows = database
         .prepare(`SELECT e.id, e.agent_id, a.name AS agent_name, ${score} AS score,
               ${criteria} AS criteria_json, e.source_metadata_json, e.created_at,
-              ${businessDateSql()} AS business_date
+              ${businessDateSql()} AS business_date,
+              ${scorecardKindSql('e', criteria)} AS scorecard
          FROM evaluations e
          LEFT JOIN agents a ON a.id = e.agent_id
          ${joins}
-         ${where.sql}
+         ${whereSql}
          ORDER BY e.created_at, e.id`)
         .all(...where.args);
+    return rows.map((row) => ({ ...row, scorecard: toScorecardKind(row.scorecard) }));
+}
+function parseCriteria(row) {
+    try {
+        const value = JSON.parse(row.criteria_json);
+        return value && typeof value === 'object' && !Array.isArray(value)
+            ? value
+            : {};
+    }
+    catch {
+        return {};
+    }
+}
+function criterionRows(kind, rows) {
+    const parsed = rows.map(parseCriteria);
+    return criteriaKeysFor(kind).map((key) => {
+        const values = parsed
+            .map((criteria) => criteria[key])
+            .filter((value) => typeof value === 'number' && Number.isFinite(value));
+        const mean = values.length
+            ? values.reduce((sum, value) => sum + value, 0) / values.length
+            : null;
+        const row = {
+            key,
+            average: mean === null ? null : round(mean),
+            applicable_count: values.length,
+            not_applicable_count: rows.length - values.length,
+        };
+        if (isQaV2Kind(kind))
+            row.pass_rate = mean === null ? null : round(mean * 100);
+        return row;
+    });
+}
+/** One criterion breakdown per checklist present in the rows (never mixes scales). */
+function criteriaSections(rows) {
+    return SCORECARD_KIND_ORDER.flatMap((kind) => {
+        const values = rows.filter((row) => row.scorecard === kind);
+        if (!values.length)
+            return [];
+        const section = {
+            scorecard: kind,
+            evaluation_count: values.length,
+            criteria: criterionRows(kind, values),
+        };
+        if (isQaV2Kind(kind))
+            section.critical_violations = criticalViolations(values);
+        return [section];
+    });
+}
+function criticalViolations(rows) {
+    return rows.filter((row) => hasCriticalViolation(row.scorecard, parseCriteria(row))).length;
 }
 function breakdown(rows, getKey) {
     const groups = new Map();
@@ -131,32 +185,14 @@ export function buildAnalyticsDashboard(database, filters) {
     const duration = canCompare && filters.fromMs !== undefined && filters.toExclusiveMs !== undefined
         ? filters.toExclusiveMs - filters.fromMs
         : 0;
-    const criteria = SCORECARD_CRITERIA.map((definition) => {
-        const criterion = definition.key;
-        const values = [];
-        let notApplicable = 0;
-        for (const row of rows) {
-            try {
-                const value = JSON.parse(row.criteria_json)[criterion];
-                if (typeof value === 'number' && Number.isFinite(value))
-                    values.push(value);
-                else
-                    notApplicable += 1;
-            }
-            catch {
-                notApplicable += 1;
-            }
-        }
-        return {
-            key: criterion,
-            average: values.length
-                ? round(values.reduce((sum, value) => sum + value, 0) / values.length)
-                : null,
-            applicable_count: values.length,
-            not_applicable_count: notApplicable,
-        };
-    });
-    const risk = criteria.find((row) => row.key === 'risk_management');
+    const criteria = criteriaSections(rows);
+    // Risk management exists only on the M10 checklist.
+    const risk = criteria
+        .find((section) => section.scorecard === 'm10')
+        ?.criteria.find((row) => row.key === 'risk_management') ?? {
+        applicable_count: 0,
+        not_applicable_count: 0,
+    };
     const scoredAgents = new Set(rows.map((row) => row.agent_id).filter(Boolean)).size;
     const totalAgents = database.prepare('SELECT COUNT(*) AS count FROM agents').get();
     return {
@@ -169,6 +205,7 @@ export function buildAnalyticsDashboard(database, filters) {
             reviewer: filters.reviewers,
             classifier: filters.classifiers,
             bucket: filters.bucket,
+            scorecard: filters.scorecard,
         },
         kpis: {
             evaluation_count: rows.length,
@@ -183,6 +220,7 @@ export function buildAnalyticsDashboard(database, filters) {
                 ? round((rows.filter((row) => row.score >= 80).length * 100) / rows.length)
                 : null,
             below_60_count: rows.filter((row) => row.score < 60).length,
+            critical_violations: criticalViolations(rows),
             risk_applicable_count: risk.applicable_count,
             risk_not_applicable_count: risk.not_applicable_count,
         },

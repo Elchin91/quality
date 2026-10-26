@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { AgentMappingService } from '../chatQa/mappings.js';
+import { chatAiDraftStatus } from '../chatQa/aiDraft.js';
 import { autoConfirmSuggestedMappings, backfillConfirmedInteractionMappings, } from '../chatQa/syncMappings.js';
 import { cancelTask, createManualTask, reassignTask, } from '../chatQa/service.js';
 import { adminOptions, sourceSummary } from '../chatQa/adminMetadata.js';
@@ -120,7 +121,7 @@ function taskDto(row) {
         assignment_explanation: row.assignment_explanation,
         status: row.status,
         deadline_at: row.deadline_at,
-        ai_draft_status: row.ai_draft_status,
+        ai_draft_status: chatAiDraftStatus(row.ai_draft_status, row.ai_draft_json),
         evaluation_id: row.evaluation_id,
         assigned_at: row.assigned_at,
         started_at: row.started_at,

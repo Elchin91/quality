@@ -185,9 +185,11 @@ const callQaAiLimiter = rateLimit({
     handler: callQaRateLimitHandler,
     keyGenerator: (req) => `user:${req.user.id}`,
 });
+// Chat review auto-loads every image/video/audio (plus adjacent conversations), so the
+// per-user budget is generous; upstream stays protected by the 3-concurrent fetch gate.
 const chatAttachmentLimiter = rateLimit({
     windowMs: 15 * 60_000,
-    max: 100,
+    max: 600,
     standardHeaders: true,
     legacyHeaders: false,
     handler: callQaRateLimitHandler,

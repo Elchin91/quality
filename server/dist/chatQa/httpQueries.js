@@ -3,6 +3,7 @@ import { pageResult, parseJson, safeClassifiers, safeTranscript } from './http.j
 import { participantCandidates } from './adminMetadata.js';
 import { sanitizeReviewerActivityReason } from './evidenceSecurity.js';
 import { effectiveTranscriptJson } from './retention.js';
+import { chatAiDraftStatus } from './aiDraft.js';
 import { retainedTranscriptInterval } from './schema.js';
 import { sourceFailureDetailsDto } from './sourceFailureDetails.js';
 import { configuredDefaultCapacity, reviewerReadiness, reviewerReadinessMap, } from '../reviewerAssignment/repository.js';
@@ -215,7 +216,7 @@ function taskDto(row, admin, assignment = null) {
         deadline_at: row.deadline_at,
         contact_started_at: contact.startedAt,
         contact_ended_at: contact.endedAt,
-        ai_draft_status: row.ai_draft_status,
+        ai_draft_status: chatAiDraftStatus(row.ai_draft_status, row.ai_draft_json ?? null),
         evaluation_id: row.evaluation_id,
         assigned_at: row.assigned_at,
         started_at: row.started_at,
