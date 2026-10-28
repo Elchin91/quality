@@ -70,7 +70,12 @@ class AttachmentFetchGate {
 function fail(code, httpStatus) {
     throw new ChatAttachmentAccessError(code, httpStatus);
 }
-/** Upstream file fetch behind the concurrency gate; the caller must call `release`. */
+/**
+ * Upstream file fetch behind the concurrency gate. The permit only covers the upstream read: it is
+ * returned as soon as the bytes are in memory, because a browser may stop reading a response
+ * (a paused <audio preload="metadata">) and must not block every other attachment. `release`
+ * stays part of the delivery contract and is a no-op.
+ */
 export function createGatedAttachmentFetch(client, maxConcurrentFetches = 3) {
     const fetchGate = new AttachmentFetchGate(maxConcurrentFetches);
     return async (locator, signal) => {
@@ -80,7 +85,8 @@ export function createGatedAttachmentFetch(client, maxConcurrentFetches = 3) {
         try {
             release = await fetchGate.acquire(signal);
             const media = await client.getFile(locator, signal);
-            return { ...media, release };
+            release();
+            return { ...media, release: () => undefined };
         }
         catch (error) {
             release?.();

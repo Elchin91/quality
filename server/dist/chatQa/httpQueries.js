@@ -216,6 +216,8 @@ function taskDto(row, admin, assignment = null) {
         deadline_at: row.deadline_at,
         contact_started_at: contact.startedAt,
         contact_ended_at: contact.endedAt,
+        // When the source closed the conversation; kept after the transcript retention expires.
+        contact_closed_at: typeof row.closed_at_utc === 'number' ? row.closed_at_utc : null,
         ai_draft_status: chatAiDraftStatus(row.ai_draft_status, row.ai_draft_json ?? null),
         evaluation_id: row.evaluation_id,
         assigned_at: row.assigned_at,
@@ -248,7 +250,8 @@ export function listAdminTasks(db, input, now) {
     const rows = db
         .prepare(`SELECT tasks.*,agents.name agent_name,reviewer.name reviewer_name,
      reviewer.active reviewer_active,reviewer.must_change_password reviewer_must_change_password,
-     si.channels_json,si.client_message_count,si.agent_message_count,si.transcript_json ${from}
+     si.channels_json,si.client_message_count,si.agent_message_count,si.transcript_json,
+     si.completed_at_utc closed_at_utc ${from}
      ORDER BY tasks.created_at DESC,tasks.id LIMIT ? OFFSET ?`)
         .all(...args, input.page_size, (input.page - 1) * input.page_size);
     const assignments = reviewerReadinessMap(db, rows.map((row) => String(row.reviewer_user_id)), configuredDefaultCapacity(db));
@@ -267,7 +270,8 @@ export function listReviewerTasks(db, reviewerId, input, now) {
         .count;
     const rows = db
         .prepare(`SELECT tasks.*,agents.name agent_name,si.channels_json,si.client_message_count,
-     si.agent_message_count,si.transcript_json ${from} ORDER BY tasks.deadline_at,tasks.id LIMIT ? OFFSET ?`)
+     si.agent_message_count,si.transcript_json,si.completed_at_utc closed_at_utc ${from}
+     ORDER BY tasks.deadline_at,tasks.id LIMIT ? OFFSET ?`)
         .all(...args, input.page_size, (input.page - 1) * input.page_size);
     const assignment = reviewerReadiness(db, reviewerId, configuredDefaultCapacity(db));
     const load = db
@@ -289,7 +293,7 @@ export function listReviewerTasks(db, reviewerId, input, now) {
 export function reviewerTaskDetail(db, taskId, reviewerId, now = Date.now()) {
     const row = db
         .prepare(`SELECT tasks.*,agents.name agent_name,si.channels_json,si.client_message_count,
-     si.agent_message_count,si.attachment_count,si.transcript_json
+     si.agent_message_count,si.attachment_count,si.transcript_json,si.completed_at_utc closed_at_utc
      FROM chat_qa_tasks tasks JOIN source_interactions si ON si.id=tasks.interaction_id
      JOIN agents ON agents.id=tasks.agent_id WHERE tasks.id=? AND tasks.reviewer_user_id=?`)
         .get(taskId, reviewerId);

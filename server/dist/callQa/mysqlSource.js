@@ -76,6 +76,7 @@ function reportQuery(cursor, limit) {
     LEFT JOIN report.users u ON u.id = c.user_id
     WHERE c.type = ? AND c.queue_name = ?
       AND c.answer_date >= ? AND c.answer_date < ?
+      AND c.created_at >= DATE_SUB(?, INTERVAL 1 DAY) AND c.created_at < ?
       AND c.end_date IS NOT NULL AND c.request_id IS NOT NULL
       AND c.omnichannel_id IS NOT NULL AND c.user_id IS NOT NULL
       ${cursor ? 'AND (c.answer_date > ? OR (c.answer_date = ? AND c.id > ?))' : ''}
@@ -249,6 +250,8 @@ export function createMysqlCallSourceAdapter(config) {
                         'm10',
                         new Date(0),
                         new Date(0),
+                        new Date(0),
+                        new Date(0),
                     ]);
                 });
             }
@@ -264,6 +267,9 @@ export function createMysqlCallSourceAdapter(config) {
                         'in',
                         'in',
                         'm10',
+                        new Date(request.startInclusiveUtc),
+                        new Date(request.endExclusiveUtc),
+                        // answer_date is not indexed; a call is answered after it is created (minutes, not days).
                         new Date(request.startInclusiveUtc),
                         new Date(request.endExclusiveUtc),
                     ];

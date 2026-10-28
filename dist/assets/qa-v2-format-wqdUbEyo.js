@@ -1,1 +1,0 @@
-import{n as e,t}from"./qaV2Checklists-CpKxTmb1.js";import{A as n,E as r}from"./index-BRc6hwxM.js";function i(e){return`${Number((e/100).toFixed(2))}%`}var a=new Set([...e,...t].map(e=>e.key));function o(e){return a.has(e)}function s(e,t){let i=r(e,t);return n(i)?i:null}function c(e){return`${Math.round(e*100)}% 👍`}export{s as i,i as n,o as r,c as t};
