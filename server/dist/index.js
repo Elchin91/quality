@@ -60,7 +60,7 @@ import { createCallQaRuntime } from './callQa/runtime.js';
 import { transcribeCallQaTask } from './callQa/transcription.js';
 import { loadRecordingConfig } from './callQa/recordingConfig.js';
 import { CallsOmniAttachmentClient } from './chatQa/attachmentClient.js';
-import { createChatAttachmentAccess } from './chatQa/attachmentAccess.js';
+import { createChatAttachmentAccess, createGatedAttachmentFetch, } from './chatQa/attachmentAccess.js';
 import { chatQaPrivateEvidenceHeaders } from './chatQa/http.js';
 import { createEventsRouter } from './routes/events.js';
 import { createQaPoliciesRouter } from './routes/qa-policies.js';
@@ -93,10 +93,13 @@ try {
 catch {
     chatAttachmentClient = null;
 }
+// One gated upstream fetcher: reviewed-chat, evaluation and neighbour-context attachments share it.
+const chatAttachmentFetch = createGatedAttachmentFetch(chatAttachmentClient);
 export const openChatAttachment = createChatAttachmentAccess({
     db,
     source: () => chatQaRuntime.getOrConnectSource(),
     client: chatAttachmentClient,
+    fetchFile: chatAttachmentFetch,
 });
 export const callQaRuntime = createCallQaRuntime({
     db,
@@ -222,7 +225,12 @@ app.use('/api', createReviewerDashboardRouter({ db }));
 app.use('/api', createContactContextRouter({ db }));
 app.use('/api', createCallQaPolicyRouter({ db }));
 app.use('/api', createQaUnusableRouter({ db }));
-app.use('/api', createChatContextRouter({ db, source: () => chatQaRuntime.getOrConnectSource() }));
+app.use('/api', createChatContextRouter({
+    db,
+    source: () => chatQaRuntime.getOrConnectSource(),
+    fetchAttachment: chatAttachmentFetch,
+    attachmentLimiter: chatAttachmentLimiter,
+}));
 // Agent-scoped portal.
 app.use('/api', meRouter);
 app.use('/api', createHistoricalEvaluationRouter(db));

@@ -97,7 +97,7 @@ export function pageResult(items, total, page, pageSize) {
     return { items, page, page_size: pageSize, total };
 }
 const PUBLIC_CLASSIFIER_TOPICS = new Set(['payments', 'refund']);
-function attachmentPreviewBehavior(category) {
+export function attachmentPreviewBehavior(category) {
     if (category === 'image')
         return 'image_dialog';
     if (category === 'audio')

@@ -98,6 +98,21 @@ function attachmentText(attachment) {
     const caption = attachment.caption;
     return caption ? `${marker} ${caption}` : marker;
 }
+/**
+ * Display metadata, reviewer text and server-only locator for one raw source attachment
+ * message (null for text). Used for read-only context outside the reviewed transcript.
+ */
+export function describeSourceAttachment(message) {
+    const category = attachmentType(message);
+    if (!category)
+        return null;
+    const attachment = attachmentEvidence(message, category);
+    return {
+        attachment,
+        text: attachmentText(attachment),
+        locator: attachmentLocator(message, category),
+    };
+}
 function byCreatedTimeThenId(left, right) {
     const leftTime = left.createdAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
     const rightTime = right.createdAt?.getTime() ?? Number.MAX_SAFE_INTEGER;

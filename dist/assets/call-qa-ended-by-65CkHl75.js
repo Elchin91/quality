@@ -1,0 +1,1 @@
+function e(e,t){return e(t?`call_qa.ended_by.${t}`:`qa_contact.unavailable`)}export{e as t};

@@ -4,6 +4,7 @@ import { CALL_SOURCE_MAX_PAGE_SIZE, CALL_SOURCE_MAX_WINDOW_DAYS, } from './sourc
 const DAY_MS = 86_400_000;
 const MAX_CURSOR_LENGTH = 256;
 const MAX_TALK_EVENTS = 32;
+const MAX_TOPIC_NAMES = 50;
 // eslint-disable-next-line no-control-regex -- Source identifiers must reject ASCII controls.
 const CONTROL_CHARACTER = /[\u0000-\u001F\u007F]/u;
 const arrayIsArray = Array.isArray;
@@ -30,6 +31,8 @@ export const CALL_SOURCE_PROJECTION = Object.freeze({
     queueLabel: 1,
     sourceDurationSeconds: 1,
     sourceUpdatedAt: 1,
+    topicNames: 1,
+    hangUpBy: 1,
 });
 function validDate(value) {
     return value instanceof Date && Number.isFinite(value.getTime());
@@ -82,6 +85,23 @@ function snapshotTimeValue(value) {
         return { state: 'invalid' };
     }
 }
+/** A copy of the topic-name list holding only its string entries; undefined/null pass through. */
+function projectedTopicNames(value) {
+    if (value === null || value === undefined)
+        return value;
+    const length = arrayLength(value, MAX_TOPIC_NAMES);
+    if (length === null)
+        return 'invalid';
+    const names = [];
+    for (let index = 0; index < length; index += 1) {
+        const entry = ownDataProperty(value, index);
+        if (entry.state === 'invalid')
+            return 'invalid';
+        if (entry.state === 'data' && typeof entry.value === 'string')
+            names.push(entry.value);
+    }
+    return names;
+}
 function projectedTalkEvents(value) {
     if (value === null || value === undefined)
         return null;
@@ -120,6 +140,7 @@ const RAW_RECORD_FIELDS = [
     'queueLabel',
     'sourceDurationSeconds',
     'sourceUpdatedAt',
+    'hangUpBy',
 ];
 function projectedRecord(value) {
     const record = createObject(null);
@@ -137,6 +158,16 @@ function projectedRecord(value) {
         malformed = true;
     else
         record.talkEvents = talkEvents;
+    const topicNamesProperty = ownDataProperty(value, 'topicNames');
+    if (topicNamesProperty.state === 'invalid')
+        malformed = true;
+    else if (topicNamesProperty.state === 'data') {
+        const topicNames = projectedTopicNames(topicNamesProperty.value);
+        if (topicNames === 'invalid')
+            malformed = true;
+        else
+            record.topicNames = topicNames;
+    }
     for (let index = 0; index < RAW_RECORD_FIELDS.length; index += 1) {
         const field = RAW_RECORD_FIELDS[index];
         const property = ownDataProperty(value, field);

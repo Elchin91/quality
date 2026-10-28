@@ -1,5 +1,5 @@
 import { calculateM10Score, criteriaShape, SCORECARD_CRITERIA } from './scorecard.js';
-import { calculateQaV2Score, qaV2Criteria, qaV2CriteriaShape, } from './qaV2Scorecard.js';
+import { calculateQaV2Score, qaV2CriteriaShape, qaV2CriterionKeys, } from './qaV2Scorecard.js';
 import { calculateTelesalesScore, TELESALES_CRITERION_KEYS, } from './telesalesScorecard.js';
 import { z } from 'zod';
 export function isQaV2Kind(kind) {
@@ -11,7 +11,7 @@ export function standardKindFor(type) {
 }
 export function criteriaKeysFor(kind) {
     if (isQaV2Kind(kind))
-        return qaV2Criteria(kind).map((c) => c.key);
+        return qaV2CriterionKeys(kind);
     if (kind === 'telesales')
         return TELESALES_CRITERION_KEYS;
     return SCORECARD_CRITERIA.map((c) => c.key);
@@ -19,7 +19,10 @@ export function criteriaKeysFor(kind) {
 const telesalesShape = z
     .object(Object.fromEntries(TELESALES_CRITERION_KEYS.map((key) => [key, z.number().int().min(0).max(4)])))
     .strict();
-/** Validates raw criteria for the checklist; throws ZodError. */
+/**
+ * Validates raw (stored/appeal) criteria for the checklist; throws ZodError. v2 penalty criteria
+ * (call_taq) are optional here because older evaluations lack them.
+ */
 export function parseCriteriaFor(kind, raw) {
     if (isQaV2Kind(kind))
         return qaV2CriteriaShape(kind).parse(raw);

@@ -70,6 +70,26 @@ class AttachmentFetchGate {
 function fail(code, httpStatus) {
     throw new ChatAttachmentAccessError(code, httpStatus);
 }
+/** Upstream file fetch behind the concurrency gate; the caller must call `release`. */
+export function createGatedAttachmentFetch(client, maxConcurrentFetches = 3) {
+    const fetchGate = new AttachmentFetchGate(maxConcurrentFetches);
+    return async (locator, signal) => {
+        if (!client)
+            return fail('source_unavailable', 503);
+        let release = null;
+        try {
+            release = await fetchGate.acquire(signal);
+            const media = await client.getFile(locator, signal);
+            return { ...media, release };
+        }
+        catch (error) {
+            release?.();
+            if (error instanceof ChatAttachmentError && error.code === 'attachment_unavailable')
+                return fail('attachment_unavailable', 404);
+            return fail('source_unavailable', 503);
+        }
+    };
+}
 function authorizedContext(db, input, now) {
     const evaluationAccess = input.evaluationId !== undefined;
     const taskId = evaluationAccess
@@ -145,7 +165,8 @@ function upgradeLegacyBinding(dependencies, input, expected, nextHash) {
     })();
 }
 export function createChatAttachmentAccess(dependencies) {
-    const fetchGate = new AttachmentFetchGate(dependencies.maxConcurrentFetches ?? 3);
+    const fetchFile = dependencies.fetchFile ??
+        createGatedAttachmentFetch(dependencies.client, dependencies.maxConcurrentFetches ?? 3);
     return async (input) => {
         const accessNow = dependencies.now?.() ?? Date.now();
         let initial = authorizedContext(dependencies.db, input, accessNow);
@@ -183,18 +204,7 @@ export function createChatAttachmentAccess(dependencies) {
         const locator = attachmentLocatorForTranscriptIndex(loaded, input.transcriptIndex);
         if (!locator)
             return fail('attachment_unavailable', 404);
-        let media;
-        let release = null;
-        try {
-            release = await fetchGate.acquire(input.signal);
-            media = await dependencies.client.getFile(locator, input.signal);
-        }
-        catch (error) {
-            release?.();
-            if (error instanceof ChatAttachmentError && error.code === 'attachment_unavailable')
-                return fail('attachment_unavailable', 404);
-            return fail('source_unavailable', 503);
-        }
+        const { release, ...media } = await fetchFile(locator, input.signal);
         let current;
         try {
             current = authorizedContext(dependencies.db, input, dependencies.now?.() ?? Date.now());

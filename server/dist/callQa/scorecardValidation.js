@@ -1,12 +1,14 @@
 import { SCORECARD_CRITERIA, scoreShape } from '../prompts/scorecard.js';
 import { TELESALES_CRITERION_KEYS, } from '../prompts/telesalesScorecard.js';
-import { qaV2Criteria, qaV2ScoreShape } from '../prompts/qaV2Scorecard.js';
-import { parseCriteriaFor } from '../prompts/scorecardRegistry.js';
+import { qaV2Criteria, qaV2CriteriaShape, qaV2CriterionKeys, qaV2ScoreShape, } from '../prompts/qaV2Scorecard.js';
 import { evaluationMetadataShape } from '../aiEvaluation/types.js';
 import { captureRuntimeInput, isSafeAuditText } from './runtimeInput.js';
 import { CallQaServiceError } from './errors.js';
 const criterionKeys = SCORECARD_CRITERIA.map(({ key }) => key);
-const callV2Keys = qaV2Criteria('call_v2').map(({ key }) => key);
+/** Every call_v2 key a reviewer submits: the weighted criteria plus TAQ (call_taq). */
+const callV2Keys = qaV2CriterionKeys('call_v2');
+/** The keys the AI judges (no TAQ). */
+const aiCallV2Keys = qaV2Criteria('call_v2').map(({ key }) => key);
 const trim = String.prototype.trim;
 export function fail(code, status = 409) {
     throw new CallQaServiceError(code, status);
@@ -62,15 +64,16 @@ export function hasM10CriteriaKeys(value) {
     }
 }
 /**
- * Standard calls are completed on call_v2: every criterion is required and is 1 (thumbs-up) or
- * 0 (thumbs-down). A body carrying any M10 criterion is a stale client → scorecard_version_mismatch.
+ * Standard calls are completed on call_v2: every criterion, TAQ included, is required and is
+ * 1 (thumbs-up) or 0 (thumbs-down). A body carrying any M10 criterion is a stale client →
+ * scorecard_version_mismatch.
  */
 export function validateCallV2Criteria(value) {
     const captured = captureRuntimeInput(value, [], [...callV2Keys, ...criterionKeys], invalidInput);
     if (criterionKeys.some((key) => Object.hasOwn(captured, key)))
         fail('scorecard_version_mismatch', 400);
     try {
-        return parseCriteriaFor('call_v2', captured);
+        return qaV2CriteriaShape('call_v2', 'required').parse(captured);
     }
     catch {
         return invalidInput();
@@ -141,11 +144,11 @@ function safeStringArray(value, reject) {
     }
     return result;
 }
-/** call_v2 AI criteria: every key, 1 or 0 only; anything else is an invalid AI scorecard. */
+/** call_v2 AI criteria: every AI-judged key, 1 or 0 only; anything else is an invalid AI scorecard. */
 function validateAiCallV2Criteria(value) {
-    const captured = captureRuntimeInput(value, callV2Keys, [], invalidAi);
+    const captured = captureRuntimeInput(value, aiCallV2Keys, [], invalidAi);
     try {
-        return parseCriteriaFor('call_v2', captured);
+        return qaV2CriteriaShape('call_v2', 'omit').parse(captured);
     }
     catch {
         return invalidAi();

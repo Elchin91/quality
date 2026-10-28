@@ -15,6 +15,7 @@ const REVIEWER_VIEW_COLUMNS = `
   agents.name AS agent_name,records.call_started_at_utc,
   records.call_ended_at_utc,records.baku_date,records.duration_seconds,
   records.caller_last_four,records.caller_number,records.direction,records.queue_label,
+  records.topic_names_json,records.hang_up_by,
   CASE WHEN records.recording_status = 'ready' AND uploads.id IS NOT NULL
     AND uploads.type = 'call' AND uploads.size = records.recording_size_bytes
     AND uploads.mime IS records.recording_mime_type THEN 1 ELSE 0 END AS recording_available`;
@@ -65,6 +66,29 @@ function safeText(value, maxLength) {
 function safeLabel(value) {
     return safeText(value, 160);
 }
+/** Stored operator topics: a list of safe names, or null when unknown/unreadable. */
+export function storedTopics(value) {
+    if (value === null)
+        return null;
+    try {
+        const parsed = JSON.parse(value);
+        if (!Array.isArray(parsed))
+            return null;
+        return parsed
+            .filter((name) => typeof name === 'string' &&
+            name.length > 0 &&
+            name.length <= 256 &&
+            name.trim() === name &&
+            SAFE_TEXT.test(name))
+            .slice(0, 10);
+    }
+    catch {
+        return null;
+    }
+}
+export function storedEndedBy(value) {
+    return value === 'customer' || value === 'agent' || value === 'transfer' ? value : null;
+}
 function taskView(row) {
     return {
         taskId: row.task_id,
@@ -92,6 +116,8 @@ function taskView(row) {
             queueLabel: safeLabel(row.queue_label),
         },
         recordingAvailable: row.recording_available === 1,
+        topics: storedTopics(row.topic_names_json),
+        endedBy: storedEndedBy(row.hang_up_by),
     };
 }
 function adminTaskView(row) {

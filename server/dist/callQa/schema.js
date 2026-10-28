@@ -222,6 +222,9 @@ export function createCallQaSchema(db) {
     addColumnIfMissing(db, 'call_source_records', 'direction', 'TEXT');
     addColumnIfMissing(db, 'call_source_records', 'queue_label', 'TEXT');
     addColumnIfMissing(db, 'call_source_records', 'caller_number', "TEXT CHECK(caller_number IS NULL OR (length(caller_number) BETWEEN 7 AND 15 AND caller_number NOT GLOB '*[^0-9]*'))");
+    // Operator-selected topics (JSON array of ≤10 names) and who ended the call, from the source.
+    addColumnIfMissing(db, 'call_source_records', 'topic_names_json', "TEXT CHECK(topic_names_json IS NULL OR (json_valid(topic_names_json) AND json_type(topic_names_json)='array'))");
+    addColumnIfMissing(db, 'call_source_records', 'hang_up_by', "TEXT CHECK(hang_up_by IS NULL OR hang_up_by IN ('customer','agent','transfer'))");
     addColumnIfMissing(db, 'call_source_records', 'eligibility_status', "TEXT NOT NULL DEFAULT 'eligible' CHECK(eligibility_status IN ('eligible','ineligible'))");
     addColumnIfMissing(db, 'call_source_records', 'eligibility_reason', 'TEXT');
     addColumnIfMissing(db, 'call_source_records', 'eligibility_decision_version', 'INTEGER NOT NULL DEFAULT 0 CHECK(eligibility_decision_version IN (0,1))');

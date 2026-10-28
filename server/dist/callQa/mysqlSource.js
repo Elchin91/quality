@@ -1,5 +1,6 @@
 import mysql from 'mysql2/promise';
 import { boundedSqlLimit } from '../sourceSqlLimit.js';
+import { logger } from '../logger.js';
 import { allowsCorporateMysql } from '../chatQa/sourceConfig.js';
 import { assertLaptopVpnRoute, LAPTOP_VPN_SOURCE_HOST, monitorLaptopVpnRoute, } from '../sourceVpnRoute.js';
 import { CALL_SOURCE_MAX_PAGE_SIZE, CALL_SOURCE_MAX_WINDOW_DAYS, } from './sourceConfig.js';
@@ -9,6 +10,8 @@ const TIMEOUT_MS = 10_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u;
 const CURSOR = /^call-report:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z):(\d{1,16})$/u;
+/** Operator-selected topics kept per call (the reviewer sees them next to TAQ). */
+const MAX_TOPICS_PER_CALL = 10;
 function validDate(value) {
     return value instanceof Date && Number.isFinite(value.getTime());
 }
@@ -67,7 +70,8 @@ function reportQuery(cursor, limit) {
         AND a.type = ? AND a.completed_date IS NOT NULL) AS completedDate,
     CASE WHEN CHAR_LENGTH(REGEXP_REPLACE(c.number, '[^0-9]', '')) >= 4
       THEN RIGHT(REGEXP_REPLACE(c.number, '[^0-9]', ''), 4) ELSE NULL END AS callerLastFour,
-    REGEXP_REPLACE(c.number, '[^0-9]', '') AS callerNumber
+    REGEXP_REPLACE(c.number, '[^0-9]', '') AS callerNumber,
+    c.hang_up_by AS hangUpBy
     FROM report.call_report c
     LEFT JOIN report.users u ON u.id = c.user_id
     WHERE c.type = ? AND c.queue_name = ?
@@ -77,6 +81,47 @@ function reportQuery(cursor, limit) {
       ${cursor ? 'AND (c.answer_date > ? OR (c.answer_date = ? AND c.id > ?))' : ''}
     ORDER BY c.answer_date ASC, c.id ASC
     LIMIT ${boundedSqlLimit(limit, CALL_SOURCE_MAX_PAGE_SIZE)}`;
+}
+/** One batched, bounded read of the operator topics (report.call_registered_topic) of a page. */
+function topicQuery(count) {
+    return `SELECT callReportId, categoryName FROM (
+    SELECT t.call_report_id AS callReportId, t.category_name AS categoryName,
+      ROW_NUMBER() OVER (PARTITION BY t.call_report_id ORDER BY t.created_at ASC, t.id ASC) AS position
+    FROM report.call_registered_topic t
+    WHERE t.call_report_id IN (${Array.from({ length: count }, () => '?').join(',')})
+  ) ranked
+  WHERE position <= ${MAX_TOPICS_PER_CALL}
+  ORDER BY callReportId ASC, position ASC
+  LIMIT ${boundedSqlLimit(count * MAX_TOPICS_PER_CALL, CALL_SOURCE_MAX_PAGE_SIZE * MAX_TOPICS_PER_CALL)}`;
+}
+/**
+ * Topic names per report row id; null when the topics could not be read (the sync then keeps
+ * what it stored before). A row without topics maps to an empty list.
+ */
+async function readTopics(connection, rowIds) {
+    if (rowIds.length === 0)
+        return new Map();
+    let rows;
+    try {
+        [rows] = await connection.execute({ sql: topicQuery(rowIds.length), timeout: TIMEOUT_MS }, [...rowIds]);
+    }
+    catch (error) {
+        // Degrade gracefully but visibly: only a driver error code, never SQL, ids or messages.
+        const code = error?.code;
+        logger.warn({
+            code: typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/u.test(code) ? code : 'unknown',
+            records: rowIds.length,
+        }, 'call source operator topics unavailable');
+        return null;
+    }
+    const topics = new Map(rowIds.map((id) => [id, []]));
+    for (const row of rows) {
+        const names = topics.get(row.callReportId);
+        const name = cleanName(row.categoryName);
+        if (names && name && names.length < MAX_TOPICS_PER_CALL)
+            names.push(name);
+    }
+    return topics;
 }
 function cleanName(value) {
     if (typeof value !== 'string')
@@ -122,6 +167,7 @@ function rawRecord(row) {
         queueLabel: 'm10',
         sourceDurationSeconds: duration,
         sourceUpdatedAt: row.completedDate,
+        hangUpBy: typeof row.hangUpBy === 'string' ? row.hangUpBy : null,
     };
 }
 /** Read-only SQL authority: an answered incoming report plus the same agent's completion. */
@@ -246,12 +292,16 @@ export function createMysqlCallSourceAdapter(config) {
                         ids.add(id);
                         const record = rawRecord(row);
                         if (record)
-                            records.push(record);
+                            records.push({ ...record, rowId: row.rowId });
                         previous = row;
                     }
+                    const topics = await readTopics(connection, records.map((record) => record.rowId));
                     const last = rows.at(-1);
                     return {
-                        records,
+                        records: records.map(({ rowId, ...record }) => ({
+                            ...record,
+                            topicNames: topics ? (topics.get(rowId) ?? []) : null,
+                        })),
                         nextCursor: last && rows.length === request.limit
                             ? `call-report:${last.answerDateKey}:${last.rowId}`
                             : null,

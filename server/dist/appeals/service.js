@@ -2,6 +2,7 @@ import { nanoid } from 'nanoid';
 import { SCORECARD_CRITERIA } from '../prompts/scorecard.js';
 import { evaluationScorecardKind, TELESALES_CRITERION_KEYS, } from '../prompts/telesalesScorecard.js';
 import { criteriaKeysFor, isQaV2Kind, parseCriteriaFor, scoreFor, } from '../prompts/scorecardRegistry.js';
+import { QA_V2_PENALTY_CRITERIA } from '../prompts/qaV2Scorecard.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 import { appealEligibility } from './date.js';
 import { normalizeAlias, selectEligibleReviewer } from './assignment.js';
@@ -56,10 +57,17 @@ function validateCriteria(criteria) {
     return Object.fromEntries(SCORECARD_CRITERIA.map(({ key }) => [key, criteria[key]]));
 }
 const M10_KEYS = new Set(SCORECARD_CRITERIA.map(({ key }) => key));
-/** v2 evaluations are rescored on their own thumbs checklist; an M10 body is a stale form. */
-function validateQaV2Criteria(kind, criteria) {
+/**
+ * v2 evaluations are rescored on their own thumbs checklist; an M10 body is a stale form. The
+ * rescore keeps the evaluation's shape: a penalty criterion (call_taq) is present exactly when the
+ * original evaluation had it (call_v2 evaluations stored before TAQ existed have none).
+ */
+function validateQaV2Criteria(kind, criteria, prior) {
     if (Object.keys(criteria).some((key) => M10_KEYS.has(key)))
         throw new AppealError('scorecard_version_mismatch', 400);
+    if (isQaV2Kind(kind) &&
+        QA_V2_PENALTY_CRITERIA[kind].some(({ key }) => Object.hasOwn(criteria, key) !== Object.hasOwn(prior, key)))
+        throw new AppealError('appeal_state_conflict', 400);
     try {
         return parseCriteriaFor(kind, criteria);
     }
@@ -68,9 +76,9 @@ function validateQaV2Criteria(kind, criteria) {
     }
 }
 /** Criteria validated against the checklist the original evaluation was completed on. */
-function validateForKind(kind, criteria) {
+function validateForKind(kind, criteria, prior) {
     if (isQaV2Kind(kind))
-        return validateQaV2Criteria(kind, criteria);
+        return validateQaV2Criteria(kind, criteria, prior);
     if (kind === 'telesales')
         return validateTelesalesCriteria(criteria);
     return validateCriteria(criteria);
@@ -313,8 +321,8 @@ export class AppealService {
                 .prepare('SELECT score,criteria_json,source_metadata_json FROM evaluations WHERE id=?')
                 .get(appeal.evaluation_id);
             const kind = evaluationScorecardKind(evaluation.source_metadata_json, evaluation.criteria_json);
-            const criteria = validateForKind(kind, input.criteria);
             const prior = JSON.parse(evaluation.criteria_json);
+            const criteria = validateForKind(kind, input.criteria, prior);
             const changed = criteriaKeysFor(kind).some((key) => prior[key] !== criteria[key]);
             const next = changed ? 'adjusted' : 'upheld';
             const now = Date.now();

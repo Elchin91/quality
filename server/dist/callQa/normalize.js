@@ -135,6 +135,39 @@ function lastFour(value) {
     const digits = source.replace(/\D/gu, '');
     return digits.length >= 4 ? digits.slice(-4) : null;
 }
+const MAX_TOPIC_NAMES = 10;
+const MAX_TOPIC_NAME_LENGTH = 256;
+/** Trimmed, non-empty, control-free names (≤256 chars), first 10 kept; null when unknown. */
+function topicNames(value) {
+    if (!Array.isArray(value))
+        return null;
+    const names = [];
+    for (const entry of value) {
+        if (typeof entry !== 'string')
+            continue;
+        const name = entry.trim();
+        if (!name || name.length > MAX_TOPIC_NAME_LENGTH || CONTROL_CHARACTER.test(name))
+            continue;
+        names.push(name);
+        if (names.length === MAX_TOPIC_NAMES)
+            break;
+    }
+    return names;
+}
+const ENDED_BY = {
+    caller: 'customer',
+    customer: 'customer',
+    agent: 'agent',
+    transfer: 'transfer',
+};
+/** Source `hang_up_by` → customer | agent | transfer; unknown values → null. */
+function endedBy(value) {
+    if (typeof value !== 'string')
+        return null;
+    return Object.hasOwn(ENDED_BY, value.trim().toLowerCase())
+        ? ENDED_BY[value.trim().toLowerCase()]
+        : null;
+}
 function exclusion(code, sourceRef) {
     return sourceRef ? { kind: 'ineligible', code, sourceRef } : { kind: 'ineligible', code };
 }
@@ -231,6 +264,9 @@ export function normalizeCallSourceRecord(source, protection = {}) {
         queueLabel,
         sourceDurationSeconds: sourceDurationSeconds ?? null,
         sourceUpdatedAtUtc,
+        topicNames: topicNames(source.topicNames),
+        topicsUnavailable: source.topicNames === null,
+        endedBy: endedBy(source.hangUpBy),
     };
     return { kind: 'eligible', record };
 }

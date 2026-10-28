@@ -230,6 +230,10 @@ export const CALL_V2_HINTS = {
         'Zəng zamanı xətdə üçüncü şəxs varsa, zəng edən müştəriyə üçüncü şəxsin məlumatların eşitməsinə razı olub-olmadığı dəqiqləşdir',
     ],
 };
+export const QA_V2_PENALTY_CRITERIA = {
+    chat_v2: [],
+    call_v2: [{ key: 'call_taq', label: '“TAQ”-ı düzgün seç', penaltyBp: 1000 }],
+};
 /** Group weights in basis points. Low/medium are the sum of their criteria; critical is all-or-nothing. */
 export const QA_V2_GROUP_WEIGHT_BP = {
     chat_v2: { low: 2500, medium: 3000, critical: 4500 },
@@ -242,9 +246,17 @@ const CRITERIA_BY_KIND = {
 export function qaV2Criteria(kind) {
     return CRITERIA_BY_KIND[kind];
 }
+/** Every criterion key of the checklist: the weighted groups, then the penalty criteria. */
+export function qaV2CriterionKeys(kind) {
+    return [
+        ...CRITERIA_BY_KIND[kind].map((c) => c.key),
+        ...QA_V2_PENALTY_CRITERIA[kind].map((c) => c.key),
+    ];
+}
 /**
  * Any critical 0 => score 0. Otherwise the weights (bp) of all thumbs-up non-critical criteria plus the
- * critical group weight, divided by 100 and rounded to 2 decimals.
+ * critical group weight; each thumbs-down penalty criterion then subtracts its penalty (floor 0).
+ * Divided by 100 and rounded to 2 decimals.
  */
 export function calculateQaV2Score(kind, criteria) {
     const defs = CRITERIA_BY_KIND[kind];
@@ -256,18 +268,28 @@ export function calculateQaV2Score(kind, criteria) {
         if (c.group !== 'critical' && criteria[c.key] === 1)
             bp += c.weightBp ?? 0;
     }
+    for (const c of QA_V2_PENALTY_CRITERIA[kind]) {
+        if (criteria[c.key] === 0)
+            bp = Math.max(0, bp - c.penaltyBp);
+    }
     return { score: Math.round(bp) / 100, criticalViolation: false };
 }
 const thumb = z.union([z.literal(0), z.literal(1)]);
-/** Strict: every key required, only 0 or 1 (null/"not chosen" is a draft-only state). */
-export function qaV2CriteriaShape(kind) {
+/** Strict: every weighted key required, only 0 or 1 (null/"not chosen" is a draft-only state). */
+export function qaV2CriteriaShape(kind, penalties = 'optional') {
+    const extra = penalties === 'omit'
+        ? []
+        : QA_V2_PENALTY_CRITERIA[kind].map((c) => [
+            c.key,
+            penalties === 'required' ? thumb : thumb.optional(),
+        ]);
     return z
-        .object(Object.fromEntries(CRITERIA_BY_KIND[kind].map((c) => [c.key, thumb])))
+        .object(Object.fromEntries([...CRITERIA_BY_KIND[kind].map((c) => [c.key, thumb]), ...extra]))
         .strict();
 }
 export function qaV2NotesShape(kind) {
     return z
-        .object(Object.fromEntries(CRITERIA_BY_KIND[kind].map((c) => [c.key, z.string().max(2000).optional()])))
+        .object(Object.fromEntries(qaV2CriterionKeys(kind).map((key) => [key, z.string().max(2000).optional()])))
         .strict();
 }
 const QA_V2_ROLE = {
@@ -336,7 +358,8 @@ Rules:
 export function qaV2ScoreShape(kind) {
     return z
         .object({
-        criteria: qaV2CriteriaShape(kind),
+        // The AI does not judge penalty criteria (TAQ): the reviewer chooses them.
+        criteria: qaV2CriteriaShape(kind, 'omit'),
         language: z.enum(['az', 'ru', 'en', 'mixed']).default('mixed'),
         summary: z.string().min(1),
         strengths: z.array(z.string()).default([]),

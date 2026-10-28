@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { nanoid } from 'nanoid';
 import { z } from 'zod';
 import { criteriaShape, SCORECARD_CRITERIA } from './prompts/scorecard.js';
-import { calculateQaV2Score } from './prompts/qaV2Scorecard.js';
+import { QA_V2_PENALTY_CRITERIA, calculateQaV2Score, qaV2CriteriaShape, } from './prompts/qaV2Scorecard.js';
 import { criteriaKeysFor, parseCriteriaFor, scoreFor } from './prompts/scorecardRegistry.js';
 const M10_KEYS = new Set(SCORECARD_CRITERIA.map((item) => item.key));
 const note = z.string().trim().max(4000);
@@ -79,8 +79,18 @@ function canonical(value) {
 function fingerprint(value) {
     return createHash('sha256').update(canonical(value)).digest('hex');
 }
-/** M10 legacy drafts keep the 0–4 schema; v2 drafts follow the chat/call completion rules. */
-function reviewedCriteria(kind, input, original) {
+/** Criteria without the reviewer-only penalty keys (TAQ), which the AI never proposes. */
+function withoutPenalties(kind, criteria) {
+    if (kind === 'm10')
+        return criteria;
+    const penalties = new Set(QA_V2_PENALTY_CRITERIA[kind].map((c) => c.key));
+    return Object.fromEntries(Object.entries(criteria).filter(([key]) => !penalties.has(key)));
+}
+/**
+ * M10 legacy drafts keep the 0–4 schema; v2 drafts follow the chat/call completion rules (a new
+ * call_v2 commit requires TAQ; an idempotent replay accepts the shape it was committed with).
+ */
+function reviewedCriteria(kind, input, original, requirePenalties) {
     const raw = input.criteria ?? original.criteria;
     const rawNotes = input.criteria_notes ?? {};
     const keys = new Set(criteriaKeysFor(kind));
@@ -93,7 +103,7 @@ function reviewedCriteria(kind, input, original) {
         throw new ReviewError('scorecard_version_mismatch', 400);
     let criteria;
     try {
-        criteria = parseCriteriaFor(kind, raw);
+        criteria = qaV2CriteriaShape(kind, requirePenalties ? 'required' : 'optional').parse(raw);
     }
     catch {
         throw new ReviewError('invalid_input', 400);
@@ -107,9 +117,13 @@ function reviewedCriteria(kind, input, original) {
 }
 function finalReview(original, input, requireExplanation = true) {
     const kind = kindOf(original.scorecard);
-    const { criteria, notes: criteriaNotes } = reviewedCriteria(kind, input, original);
+    const { criteria, notes: criteriaNotes } = reviewedCriteria(kind, input, original, requireExplanation);
     const reviewNote = input.review_note ?? '';
-    if (requireExplanation && canonical(criteria) !== canonical(original.criteria) && !reviewNote) {
+    // Choosing TAQ is not a change to the AI proposal (the AI never judges it).
+    if (requireExplanation &&
+        canonical(withoutPenalties(kind, criteria)) !==
+            canonical(withoutPenalties(kind, original.criteria)) &&
+        !reviewNote) {
         throw new ReviewError('review_note required when changing criteria', 400);
     }
     const aiReview = validateAiReview(input.ai_review, original, true);

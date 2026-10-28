@@ -1,16 +1,21 @@
 import { z } from 'zod';
+import { attachmentPreviewBehavior } from './http.js';
 import { httpDate } from './httpContract.js';
+import { describeSourceAttachment, } from './normalize.js';
 /** Conversations with this many different agents are shown before and after the reviewed one. */
 export const CONTEXT_CONVERSATIONS = 2;
 const MAX_ARCHIVE_STEPS = 8;
 const MAX_MESSAGES = 500;
 const MAX_TEXT = 4_000;
+/** Cached payloads of an older shape (no attachment model) are refetched. */
+export const CHAT_CONTEXT_VERSION = 2;
 const messageSchema = z
     .object({
     type: z.string().max(64).nullable().optional(),
     content: z.string().nullable().optional(),
     caption: z.string().nullable().optional(),
     fileName: z.string().max(1_024).nullable().optional(),
+    extension: z.string().max(64).nullable().optional().catch(null),
     owner: z.string().max(32),
     userId: z.number().int().nullable().optional(),
     createdTime: z.string().max(32).nullable().optional(),
@@ -74,11 +79,22 @@ export function contextConversation(db, raw) {
     const names = agentNames(db, rows.flatMap((message) => message.owner === 'AGENT' && message.userId ? [message.userId] : []));
     const messages = [];
     for (const message of rows) {
-        const type = message.type?.toUpperCase() ?? 'TEXT';
-        const caption = message.caption?.trim();
-        const text = type === 'TEXT' || type === 'TEMPLATE'
-            ? message.content?.trim()
-            : `[${type}${message.fileName ? `: ${message.fileName}` : ''}]${caption ? ` ${caption}` : ''}`;
+        const described = describeSourceAttachment({
+            id: '',
+            conversationId: String(parsed.data.conversationId),
+            content: message.content ?? null,
+            caption: message.caption ?? null,
+            createdAt: null,
+            owner: message.owner,
+            type: message.type ?? null,
+            userId: null,
+            isDeleted: null,
+            isEdited: null,
+            fileName: message.fileName ?? null,
+            extension: message.extension ?? null,
+            serviceMessageId: null,
+        });
+        const text = described ? described.text : message.content?.trim();
         if (!text)
             continue;
         messages.push({
@@ -86,6 +102,18 @@ export function contextConversation(db, raw) {
             text: clip(text),
             created_at: date(message.createdTime),
             agent_name: message.owner === 'AGENT' && message.userId ? (names.get(message.userId) ?? null) : null,
+            ...(described
+                ? {
+                    attachment: {
+                        category: described.attachment.category,
+                        extension: described.attachment.extension,
+                        display_name: described.attachment.display_name,
+                        caption: described.attachment.caption,
+                        preview_behavior: attachmentPreviewBehavior(described.attachment.category),
+                        ...(described.locator ? { locator: described.locator } : {}),
+                    },
+                }
+                : {}),
         });
     }
     const times = messages
@@ -133,6 +161,7 @@ export async function loadChatTaskContext(db, source, interactionId, nowMs, sign
     const current = interaction ? conversationNumber(interaction.conversation_id) : null;
     const contact = customerContact(db, interactionId);
     const result = {
+        version: CHAT_CONTEXT_VERSION,
         fetched_at: nowMs,
         contact_available: Boolean(contact),
         before: [],
@@ -197,4 +226,52 @@ export function storeChatTaskContext(db, taskId, context) {
     db.prepare(`INSERT INTO chat_qa_task_context (task_id,payload_json,fetched_at_ms) VALUES (?,?,?)
      ON CONFLICT(task_id) DO UPDATE SET payload_json=excluded.payload_json,
        fetched_at_ms=excluded.fetched_at_ms`).run(taskId, JSON.stringify(context), context.fetched_at);
+}
+/** The reviewer-facing payload: every server-only attachment locator removed. */
+/**
+ * Pre-version-2 payloads rendered attachments as `[TYPE: <storage key>] caption`; drop a leading
+ * marker's name when it is a path (storage keys always contain `/`), keeping the caption.
+ */
+const LEGACY_KEY_MARKER = /^\[([A-Z0-9_]{1,64}): [^\]]*[/\\][^\]]*\]/u;
+/** The reviewer-facing payload: no server-only locator and no upstream storage key. */
+export function publicChatTaskContext(context) {
+    const legacy = context.version !== CHAT_CONTEXT_VERSION;
+    const conversations = (list) => list.map((conversation) => ({
+        ...conversation,
+        messages: conversation.messages.map((message) => {
+            const text = legacy ? message.text.replace(LEGACY_KEY_MARKER, '[$1]') : message.text;
+            if (!message.attachment)
+                return { ...message, text };
+            const { category, extension, display_name, caption, preview_behavior, locator } = message.attachment;
+            return {
+                ...message,
+                text,
+                attachment: {
+                    category,
+                    extension,
+                    display_name,
+                    caption,
+                    preview_behavior,
+                    available: !legacy && Boolean(locator),
+                },
+            };
+        }),
+    }));
+    return {
+        ...context,
+        before: conversations(context.before ?? []),
+        after: conversations(context.after ?? []),
+    };
+}
+/** Server-only locator of one neighbour attachment in a current-version cached context. */
+export function contextAttachmentLocator(context, side, conversationIndex, messageIndex) {
+    if (!context || context.version !== CHAT_CONTEXT_VERSION)
+        return null;
+    const locator = context[side]?.[conversationIndex]?.messages?.[messageIndex]?.attachment?.locator;
+    return locator &&
+        typeof locator.fileName === 'string' &&
+        typeof locator.extension === 'string' &&
+        typeof locator.category === 'string'
+        ? { fileName: locator.fileName, extension: locator.extension, category: locator.category }
+        : null;
 }

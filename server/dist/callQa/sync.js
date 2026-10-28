@@ -61,9 +61,10 @@ function persistPage(input, records, now, counters) {
       (id,source_ref,recording_locator,external_agent_id,external_agent_name,
        call_started_at_utc,call_ended_at_utc,baku_date,duration_seconds,agent_id,
        caller_last_four,caller_number,direction,queue_label,source_duration_seconds,source_updated_at,
+       topic_names_json,hang_up_by,
        eligibility_status,eligibility_reason,eligibility_decision_version,recording_status,
        first_seen_at,last_seen_at,created_at_utc,updated_at_utc)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'eligible',NULL,1,'unavailable',?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'eligible',NULL,1,'unavailable',?,?,?,?)
     ON CONFLICT(source_ref) DO UPDATE SET
       recording_locator=excluded.recording_locator,
       external_agent_id=excluded.external_agent_id,
@@ -79,6 +80,9 @@ function persistPage(input, records, now, counters) {
       queue_label=excluded.queue_label,
       source_duration_seconds=excluded.source_duration_seconds,
       source_updated_at=excluded.source_updated_at,
+      -- A successful read replaces the topics ([] = none selected); a failed read (NULL) keeps them.
+      topic_names_json=COALESCE(excluded.topic_names_json,call_source_records.topic_names_json),
+      hang_up_by=COALESCE(excluded.hang_up_by,call_source_records.hang_up_by),
       eligibility_status=excluded.eligibility_status,
       eligibility_reason=excluded.eligibility_reason,
       eligibility_decision_version=excluded.eligibility_decision_version,
@@ -96,7 +100,9 @@ function persistPage(input, records, now, counters) {
             const agentId = mappings.get(String(record.externalAgentId)) ?? null;
             if (agentId === null)
                 counters.unmapped += 1;
-            upsert.run(id, sourceRef, String(record.recordingLocator.value), String(record.externalAgentId), record.externalAgentName, record.interval.startedAtUtc, record.interval.endedAtUtc, record.interval.bakuDate, record.interval.durationSeconds, agentId, record.callerLastFour, record.callerNumber, record.direction, record.queueLabel, record.sourceDurationSeconds, record.sourceUpdatedAtUtc, now, now, now, now);
+            if (record.topicsUnavailable)
+                counters.topicsUnavailable += 1;
+            upsert.run(id, sourceRef, String(record.recordingLocator.value), String(record.externalAgentId), record.externalAgentName, record.interval.startedAtUtc, record.interval.endedAtUtc, record.interval.bakuDate, record.interval.durationSeconds, agentId, record.callerLastFour, record.callerNumber, record.direction, record.queueLabel, record.sourceDurationSeconds, record.sourceUpdatedAtUtc, record.topicNames === null ? null : JSON.stringify(record.topicNames), record.endedBy, now, now, now, now);
             publishCallSourceStatus(input.db, id, Date.parse(now));
             if (existing.has(sourceRef))
                 counters.updated += 1;
@@ -146,6 +152,7 @@ export async function syncCallCatalog(input) {
         exclusionCounts: {},
         duplicates: 0,
         unmapped: 0,
+        topicsUnavailable: 0,
     };
     const seenRefs = new Set();
     const seenCursors = new Set();

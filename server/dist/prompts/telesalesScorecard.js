@@ -1,4 +1,4 @@
-import { qaV2Criteria } from './qaV2Scorecard.js';
+import { qaV2CriterionKeys } from './qaV2Scorecard.js';
 /** Telesales checklist (sheet "Meyarlar"): six criteria scored 0–4, total = sum × 100 / 24. */
 export const TELESALES_CRITERIA = [
     { key: 'telesales_instructions', label: 'Təlimatlara riayət' },
@@ -19,8 +19,8 @@ export function calculateTelesalesScore(criteria) {
     return Math.min(100, (sum * 100) / MAX_TOTAL);
 }
 const INFERRED_KINDS = [
-    ['chat_v2', new Set(qaV2Criteria('chat_v2').map(({ key }) => key))],
-    ['call_v2', new Set(qaV2Criteria('call_v2').map(({ key }) => key))],
+    ['chat_v2', new Set(qaV2CriterionKeys('chat_v2'))],
+    ['call_v2', new Set(qaV2CriterionKeys('call_v2'))],
     ['telesales', new Set(TELESALES_CRITERION_KEYS)],
 ];
 function criteriaObject(criteria) {

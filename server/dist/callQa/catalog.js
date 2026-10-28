@@ -1,3 +1,4 @@
+import { storedEndedBy } from './queries.js';
 const DATE = /^\d{4}-\d{2}-\d{2}$/u;
 // eslint-disable-next-line no-control-regex -- rejects C0/DEL in SQL filter values
 const SAFE_FILTER = /^[^\u0000-\u001F\u007F]{1,160}$/u;
@@ -104,7 +105,7 @@ export function listCallCatalog(db, query) {
         .prepare(`SELECT records.id,records.source_ref,records.external_agent_name,
               records.call_started_at_utc,records.call_ended_at_utc,records.baku_date,
               records.duration_seconds,records.agent_id,records.caller_last_four,
-              records.caller_number,
+              records.caller_number,records.hang_up_by,
               records.direction,records.queue_label,records.recording_status,
               records.eligibility_status,records.eligibility_reason,
               records.first_seen_at,records.last_seen_at,tasks.id AS task_id,
@@ -157,6 +158,7 @@ export function listCallCatalog(db, query) {
                     : null,
                 callerLastFour: row.caller_last_four,
                 callerNumber: row.caller_number,
+                endedBy: storedEndedBy(row.hang_up_by),
                 direction: row.direction,
                 queueLabel: row.queue_label,
                 recordingStatus: row.recording_status,

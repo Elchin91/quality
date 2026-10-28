@@ -7,6 +7,7 @@ import { isTrustedRecordingClientError } from './recordingClient.js';
 import { isTrustedRecordingStoreError } from './recordingStore.js';
 import { sanitizeSpeakerRoleMap } from './speakerRoles.js';
 import { CallQaServiceError } from './service.js';
+import { storedEndedBy } from './queries.js';
 const integerText = z.string().regex(/^[1-9]\d*$/u);
 const safeText = z
     .string()
@@ -271,6 +272,7 @@ export function adminSourceDto(value) {
         caller_number: typeof source.callerNumber === 'string' && /^\d{7,15}$/u.test(source.callerNumber)
             ? source.callerNumber
             : null,
+        ended_by: storedEndedBy(source.endedBy),
         direction: source.direction,
         queue_label: source.queueLabel,
         eligibility_status: trustedEligibility ? rawEligibilityStatus.data : 'ineligible',
@@ -317,6 +319,17 @@ export function adminTaskDto(value) {
         cancelled_at_utc: task.cancelledAtUtc,
     };
 }
+/** Operator topics: safe names (≤10) or null when unknown. */
+function topicsDto(value) {
+    if (!Array.isArray(value) || nodeTypes.isProxy(value))
+        return null;
+    return value.slice(0, 10).filter((name) => typeof name === 'string' &&
+        name.trim() === name &&
+        name.length > 0 &&
+        name.length <= 256 &&
+        // eslint-disable-next-line no-control-regex -- rejects C0/DEL at the HTTP boundary
+        /^[^\u0000-\u001F\u007F]+$/u.test(name));
+}
 export function reviewerTaskDto(value) {
     const task = record(value);
     const agent = record(task.agent);
@@ -345,6 +358,8 @@ export function reviewerTaskDto(value) {
         },
         recording_available: task.recordingAvailable,
         scorecard_kind: task.scorecardKind === 'telesales' ? 'telesales' : 'm10',
+        topics: topicsDto(task.topics),
+        ended_by: storedEndedBy(task.endedBy),
     };
 }
 export function pageDto(value, itemDto) {
