@@ -1,3 +1,4 @@
+import { regularTaskPredicate } from '../qaPurpose.js';
 import { bakuMonthBounds } from './types.js';
 function columns(db, table) {
     return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
@@ -26,6 +27,7 @@ function historicalCompletedCount(db, agentId, month, channel) {
     return db
         .prepare(`SELECT COUNT(*) count FROM evaluations e
     WHERE e.agent_id=? AND e.type=? AND e.status='completed'
+      AND ${regularTaskPredicate(db, 'evaluations', 'e')}
       AND typeof(${date})='text' AND length(${date})=10
       AND ${date} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
       AND date(${date},'+0 days')=${date} AND substr(${date},1,7)=?
@@ -58,7 +60,8 @@ export function monthlyAssignedTaskCounts(db, agentId, month, channel) {
         SUM(CASE WHEN t.status='completed' THEN 1 ELSE 0 END) completed,
         SUM(CASE WHEN t.status IN ('assigned','in_progress') THEN 1 ELSE 0 END) open
        FROM ${table} t ${joinSource ? `LEFT JOIN ${sourceTable} s ON s.id=t.${sourceId}` : ''}
-       WHERE t.agent_id=? AND t.status<>'cancelled' AND (${inMonth})`)
+       WHERE t.agent_id=? AND t.status<>'cancelled' AND (${inMonth})
+         AND ${regularTaskPredicate(db, table, 't')}`)
         .get(...(joinSource ? [agentId, month, start, end] : [agentId, start, end]));
     return {
         completed: (row.completed ?? 0) + historical,
@@ -93,7 +96,8 @@ export function reviewDayAssignedCount(db, agentId, day) {
         total += db
             .prepare(`SELECT COUNT(*) count FROM ${table} t
            ${joinSource ? `LEFT JOIN ${sourceTable} s ON s.id=t.${sourceId}` : ''}
-           WHERE t.agent_id=? AND t.status<>'cancelled' AND (${onDay})`)
+           WHERE t.agent_id=? AND t.status<>'cancelled' AND (${onDay})
+             AND ${regularTaskPredicate(db, table, 't')}`)
             .get(...(joinSource ? [agentId, day.date, ...bounds] : [agentId, ...bounds])).count;
     }
     return total;

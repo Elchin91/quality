@@ -1,3 +1,4 @@
+import { ordinarySourcePredicate } from '../qaPurpose.js';
 import { randomInt } from 'node:crypto';
 import { mapWithConcurrency } from './boundedPool.js';
 import { normalizeConversation } from './normalize.js';
@@ -28,6 +29,7 @@ function eligibleSupply(db, agentId, day) {
     return db
         .prepare(`SELECT COUNT(*) count FROM source_interactions si
          WHERE si.agent_id=? AND si.eligibility_state='eligible'
+           AND ${ordinarySourcePredicate(db, 'source_interactions', 'si')}
            AND si.completed_at_utc>=? AND si.completed_at_utc<?
            AND NOT EXISTS (SELECT 1 FROM chat_qa_tasks t
              WHERE t.interaction_id=si.id AND t.status<>'cancelled')`)
@@ -56,6 +58,7 @@ export async function verifyPendingCandidates(input) {
     let consecutiveFailures = 0;
     const pendingFor = db.prepare(`SELECT id,conversation_id,completed_at_utc FROM source_interactions
      WHERE source_system=? AND agent_id=? AND eligibility_state='pending'
+       AND ${ordinarySourcePredicate(db, 'source_interactions')}
        AND completed_at_utc>=? AND completed_at_utc<? ORDER BY id`);
     const verify = async (row) => {
         const evidence = persistedConversationEvidence(db, row.id, row.conversation_id);
@@ -142,6 +145,7 @@ export async function verifyPendingForReviewDay(input, reviewDay, now, rosterRem
         const agents = input.db
             .prepare(`SELECT DISTINCT agent_id FROM source_interactions
          WHERE eligibility_state='pending' AND agent_id IS NOT NULL
+           AND ${ordinarySourcePredicate(input.db, 'source_interactions')}
            AND completed_at_utc>=? AND completed_at_utc<?`)
             .all(reviewDay.start, reviewDay.end);
         needByAgent = new Map(agents.map(({ agent_id }) => [

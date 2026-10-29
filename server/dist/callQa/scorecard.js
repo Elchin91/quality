@@ -1,3 +1,4 @@
+import { qaTaskPurpose } from '../qaPurpose.js';
 import { AiReviewError, validateAiReview } from '../aiEvaluation/review.js';
 import { readAiReview } from '../aiEvaluation/persistence.js';
 import { nanoid } from 'nanoid';
@@ -215,6 +216,7 @@ export function completeCallQaTask(input) {
         const v2 = kind === 'telesales' ? null : calculateQaV2Score('call_v2', criteria);
         const evaluationId = createId(idFactory);
         const metadata = {
+            purpose: qaTaskPurpose(db, 'call', current.id),
             source: 'call_qa',
             contact_date: current.baku_date,
             contact_started_at: Date.parse(current.call_started_at_utc),
@@ -232,8 +234,8 @@ export function completeCallQaTask(input) {
         db.prepare(`INSERT INTO evaluations
         (id,agent_id,upload_id,transcription_id,source_text,score,criteria_json,
          criteria_notes_json,source_metadata_json,source_ref,summary,strengths_json,
-         improvements_json,type,status,evaluator_id,created_at)
-       VALUES (?,?,NULL,NULL,NULL,?,?,?,?,?,?,'[]','[]','call','completed',?,?)`).run(evaluationId, current.agent_id, score, criteriaJson, notesJson, JSON.stringify(metadata), `call-qa:${current.source_record_id}`, overallNote, reviewerId, timestamp.milliseconds);
+         improvements_json,type,status,evaluator_id,created_at,purpose)
+       VALUES (?,?,NULL,NULL,NULL,?,?,?,?,?,?,'[]','[]','call','completed',?,?,?)`).run(evaluationId, current.agent_id, score, criteriaJson, notesJson, JSON.stringify(metadata), `call-qa:${current.source_record_id}`, overallNote, reviewerId, timestamp.milliseconds, metadata.purpose);
         if (aiReview.mode === 'ai' && aiFields)
             recordAiReview(db, evaluationId, aiFields, {
                 criteria,

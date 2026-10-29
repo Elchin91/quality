@@ -4,7 +4,7 @@ export function createDurableJobSchema(db) {
     CREATE TABLE IF NOT EXISTS durable_jobs (
       id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 200),
       type TEXT NOT NULL CHECK(type IN (
-        'chat_sla_scan','chat_retention_purge','chat_scheduled_cycle'
+        'chat_sla_scan','chat_retention_purge','chat_scheduled_cycle','complaint_sync','complaint_discovery'
       )),
       payload_json TEXT NOT NULL CHECK(json_valid(payload_json) AND json_type(payload_json)='object'),
       status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','dead')),
@@ -62,4 +62,25 @@ export function createDurableJobSchema(db) {
         reconcile();
     else
         db.transaction(reconcile).immediate();
+    // SQLite cannot widen a CHECK with ALTER COLUMN; preserve every row and index.
+    const sql = db
+        .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='durable_jobs'")
+        .get().sql;
+    if (!sql.includes("'complaint_sync'")) {
+        const migrate = () => {
+            const indexes = db
+                .prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='durable_jobs' AND sql IS NOT NULL")
+                .all();
+            db.exec(sql
+                .replace(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?durable_jobs["`]?/iu, 'CREATE TABLE durable_jobs_next')
+                .replace("'chat_scheduled_cycle'", "'chat_scheduled_cycle','complaint_sync','complaint_discovery'"));
+            db.exec('INSERT INTO durable_jobs_next SELECT * FROM durable_jobs; DROP TABLE durable_jobs; ALTER TABLE durable_jobs_next RENAME TO durable_jobs;');
+            for (const index of indexes)
+                db.exec(index.sql);
+        };
+        if (db.inTransaction)
+            migrate();
+        else
+            db.transaction(migrate).immediate();
+    }
 }

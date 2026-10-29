@@ -104,13 +104,18 @@ export class DurableJobRepository {
         const token = (this.options.createLeaseToken ?? (() => nanoid(24)))();
         if (!TOKEN.test(token))
             throw new Error('invalid lease token');
+        if (input.types &&
+            (!input.types.length || input.types.some((type) => !(type in JOB_PAYLOAD_SCHEMAS))))
+            return null;
+        const typeFilter = input.types ? `AND type IN (${input.types.map(() => '?').join(',')})` : '';
         return immediate(this.db, () => {
             const candidate = this.db
                 .prepare(`SELECT id FROM durable_jobs
            WHERE status IN ('queued','failed') AND available_at<=? AND attempts<max_attempts
              AND cancellation_requested_at IS NULL
+             ${typeFilter}
            ORDER BY available_at,created_at,id LIMIT 1`)
-                .get(now);
+                .get(now, ...(input.types ?? []));
             if (!candidate)
                 return null;
             const row = this.db

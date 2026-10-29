@@ -1,3 +1,4 @@
+import { regularTaskPredicate } from '../qaPurpose.js';
 import { randomInt } from 'node:crypto';
 import { bakuMonth, bakuMonthBounds } from '../qaAutomation/types.js';
 /** Which agents' work a reviewer receives automatically. */
@@ -150,6 +151,7 @@ function openWorkloads(db, reviewerUserIds) {
         const rows = db
             .prepare(`SELECT reviewer_user_id,COUNT(*) count FROM ${table}
          WHERE reviewer_user_id IN (${placeholders}) AND status IN ('assigned','in_progress')
+           AND ${regularTaskPredicate(db, table)}
          GROUP BY reviewer_user_id`)
             .all(...reviewerUserIds);
         for (const row of rows)
@@ -179,6 +181,7 @@ export function monthlyAssignments(db, reviewerUserIds, nowMs) {
         const rows = db
             .prepare(`SELECT reviewer_user_id,COUNT(*) count FROM ${table}
          WHERE reviewer_user_id IN (${placeholders}) AND status<>'cancelled'
+           AND ${regularTaskPredicate(db, table)}
            ${timed ? `AND ${column}>=? AND ${column}<?` : ''}
          GROUP BY reviewer_user_id`)
             .all(...reviewerUserIds, ...(timed ? [start, end] : []));

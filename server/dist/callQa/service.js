@@ -1,3 +1,5 @@
+import { authorizeComplaintTask, withComplaintTaskAuthorization, complaintTransactionAuthorized, } from '../complaints/taskAuthorization.js';
+import { ComplaintError } from '../complaints/types.js';
 import { directoryGroupOf } from '../callsDirectory/groups.js';
 import { nanoid } from 'nanoid';
 import { CallQaServiceError } from './errors.js';
@@ -23,7 +25,7 @@ function nowFrom(clock = () => new Date()) {
         return new Date(milliseconds).toISOString();
     }
     catch (error) {
-        if (error instanceof CallQaServiceError)
+        if (error instanceof CallQaServiceError || error instanceof ComplaintError)
             throw error;
         fail('invalid_input', 400);
     }
@@ -33,7 +35,7 @@ function idFrom(createId = () => nanoid(12)) {
         return requireIdentifier(createId(), invalidInput);
     }
     catch (error) {
-        if (error instanceof CallQaServiceError)
+        if (error instanceof CallQaServiceError || error instanceof ComplaintError)
             throw error;
         fail('invalid_input', 400);
     }
@@ -84,8 +86,11 @@ function appendEvent(input) {
     publishCallQaChange(input.db, input.taskId, input.eventType === 'assigned' ? 'qa_task.assigned' : 'qa_task.status', Date.parse(input.now));
 }
 function runImmediate(db, work) {
-    if (db.inTransaction)
+    if (db.inTransaction) {
+        if (complaintTransactionAuthorized(db))
+            return work();
         fail('task_state_conflict');
+    }
     let ownsTransaction = false;
     try {
         db.exec('BEGIN IMMEDIATE');
@@ -111,7 +116,7 @@ function runStableImmediate(db, work) {
         return runImmediate(db, work);
     }
     catch (error) {
-        if (error instanceof CallQaServiceError)
+        if (error instanceof CallQaServiceError || error instanceof ComplaintError)
             throw error;
         fail('task_state_conflict');
     }
@@ -126,6 +131,13 @@ function sourceIsCanonical(source) {
     }
 }
 export function assignCallQaTask(input) {
+    return assignTask(input);
+}
+export function createComplaintCallTask(input, complaint) {
+    const auth = authorizeComplaintTask(input.db, complaint);
+    return assignTask({ ...input, reviewerUserId: auth.reviewerUserId, actorUserId: complaint.actorUserId }, complaint);
+}
+function assignTask(input, complaint) {
     const values = captureRuntimeInput(input, ['db', 'sourceRecordId', 'reviewerUserId', 'actorUserId', 'reason'], ['deadlineAtUtc', 'clock', 'createId'], invalidInput);
     const db = requireDatabase(values.db, invalidInput);
     const sourceRecordId = requireIdentifier(values.sourceRecordId, invalidInput);
@@ -138,7 +150,8 @@ export function assignCallQaTask(input) {
     const deadlineAtUtc = canonicalOptionalUtc(values.deadlineAtUtc, invalidInput);
     try {
         return runImmediate(db, () => {
-            const actorRole = authorizedActor(db, actorUserId, 'admin');
+            const authorization = complaint ? authorizeComplaintTask(db, complaint) : null;
+            const actorRole = authorization?.actor.role ?? authorizedActor(db, actorUserId, 'admin');
             const source = db
                 .prepare(`SELECT id,external_agent_id,agent_id,call_started_at_utc,call_ended_at_utc,baku_date,
                   duration_seconds,eligibility_status,eligibility_reason,recording_status,
@@ -147,6 +160,8 @@ export function assignCallQaTask(input) {
                 .get(sourceRecordId);
             if (!source)
                 fail('not_found', 404);
+            if (complaint && source.agent_id !== complaint.agentId)
+                fail('mapping_required');
             if (source.eligibility_status !== 'eligible' ||
                 source.eligibility_reason !== null ||
                 !sourceIsCanonical(source)) {
@@ -191,12 +206,14 @@ export function assignCallQaTask(input) {
                 .get(source.id)) {
                 fail('duplicate_task');
             }
-            if (operatorMonthlyCapacity(db, source.agent_id, Date.parse(source.call_started_at_utc))
-                .remaining === 0) {
+            if (!complaint &&
+                operatorMonthlyCapacity(db, source.agent_id, Date.parse(source.call_started_at_utc))
+                    .remaining === 0) {
                 fail('quota_unavailable');
             }
-            if (operatorChannelCapacity(db, source.agent_id, Date.parse(source.call_started_at_utc), 'call')
-                .remaining === 0) {
+            if (!complaint &&
+                operatorChannelCapacity(db, source.agent_id, Date.parse(source.call_started_at_utc), 'call')
+                    .remaining === 0) {
                 fail('quota_unavailable');
             }
             const taskId = idFrom(createId);
@@ -204,9 +221,9 @@ export function assignCallQaTask(input) {
              (id,source_record_id,agent_id,reviewer_user_id,status,assignment_origin,
              assigned_by_user_id,assignment_reason,assignment_explanation,deadline_at_utc,
              version,assigned_at_utc,
-             created_at_utc,updated_at_utc,scorecard_kind)
-           VALUES (?,?,?,?,'assigned','manual',?,?,?,?,1,?,?,?,?)`).run(taskId, source.id, source.agent_id, reviewerUserId, actorUserId, reason, explanation, deadlineAtUtc, now, now, now, directoryGroupOf(db, source.agent_id) === 'telesales' ? 'telesales' : 'm10');
-            appendEvent({
+             created_at_utc,updated_at_utc,scorecard_kind,purpose)
+           VALUES (?,?,?,?,'assigned','manual',?,?,?,?,1,?,?,?,?,?)`).run(taskId, source.id, source.agent_id, reviewerUserId, actorUserId, reason, explanation, deadlineAtUtc, now, now, now, directoryGroupOf(db, source.agent_id) === 'telesales' ? 'telesales' : 'm10', complaint ? 'complaint' : 'regular');
+            const writeEvent = () => appendEvent({
                 db,
                 createId,
                 taskId,
@@ -225,11 +242,16 @@ export function assignCallQaTask(input) {
                 },
                 now,
             });
+            if (complaint)
+                withComplaintTaskAuthorization(db, complaint, writeEvent);
+            else
+                writeEvent();
+            complaint?.onCreated(taskId);
             return taskFrom(task(db, taskId));
         });
     }
     catch (error) {
-        if (error instanceof CallQaServiceError)
+        if (error instanceof CallQaServiceError || error instanceof ComplaintError)
             throw error;
         if (error?.code === 'SQLITE_CONSTRAINT_UNIQUE') {
             fail('duplicate_task');

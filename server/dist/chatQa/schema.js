@@ -1,3 +1,4 @@
+import { migrateQaComplaintPurpose } from '../qaPurpose.js';
 import { createReviewerAssignmentSchema } from '../reviewerAssignment/repository.js';
 import { createManualChatSyncSchema } from './manualSyncSchema.js';
 export const CHAT_SYNC_LEASE_MS = 10 * 60 * 1_000;
@@ -357,5 +358,6 @@ export function createChatQaSchema(db, clock = () => new Date()) {
         // Customer channel id (WhatsApp phone, Telegram id) shown to reviewers and searchable.
         db.exec('ALTER TABLE source_interactions ADD COLUMN customer_contact TEXT');
     }
+    migrateQaComplaintPurpose(db);
     db.prepare('INSERT OR IGNORE INTO chat_sampling_policy (id, updated_at) VALUES (1, ?)').run(now);
 }

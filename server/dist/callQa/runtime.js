@@ -19,6 +19,7 @@ import { createCallQaReadiness } from './readiness.js';
 import { CallRecordingStore } from './recordingStore.js';
 import { CallRecordingCache, recordingCacheSettings } from './recordingCache.js';
 import { getReviewerCallQaTask, listReviewerCallQaTasks } from './queries.js';
+import { discoverCallContacts } from '../complaints/discoverySources.js';
 import { assignCallQaTask, CallQaServiceError, cancelCallQaTask, completeCallQaTask, generateCallQaAiDraft, startCallQaTask, } from './service.js';
 import { callSourceConfigFromChatSource } from './sourceConfig.js';
 import { syncCallCatalog } from './sync.js';
@@ -437,6 +438,39 @@ export function createCallQaRuntime(options) {
         reviewer,
         status,
         automation,
+        complaints: {
+            discover: async (window, phone, signal) => {
+                if (!source || !state.normalizationProtection)
+                    throw new Error('source_unavailable');
+                return discoverCallContacts({
+                    db: options.db,
+                    source,
+                    normalizationProtection: state.normalizationProtection,
+                    window,
+                    phone,
+                    signal,
+                });
+            },
+            prepare: async (sourceId, signal) => {
+                const row = options.db
+                    .prepare('SELECT recording_locator FROM call_source_records WHERE id=?')
+                    .get(sourceId);
+                if (!row)
+                    throw new CallQaServiceError('not_found', 404);
+                if (cache) {
+                    await cache.prepare(sourceId, signal);
+                    return;
+                }
+                if (!recordingStore || !recordingClient)
+                    throw new Error('recording_not_ready');
+                await recordingStore.store({
+                    sourceRecordId: sourceId,
+                    response: (await recordingClient.getRecording(locator(row.recording_locator), signal))
+                        .response,
+                    signal,
+                });
+            },
+        },
         close: async () => {
             await cache?.close();
         },

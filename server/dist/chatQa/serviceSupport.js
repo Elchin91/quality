@@ -1,3 +1,4 @@
+import { complaintTransactionAuthorized } from '../complaints/taskAuthorization.js';
 import { nanoid } from 'nanoid';
 import { SCORECARD_CRITERIA } from '../prompts/scorecard.js';
 import { qaV2Criteria } from '../prompts/qaV2Scorecard.js';
@@ -82,8 +83,11 @@ export function ownedTask(db, id, reviewerUserId) {
     return row;
 }
 export function runImmediate(db, work) {
-    if (db.inTransaction)
+    if (db.inTransaction) {
+        if (complaintTransactionAuthorized(db))
+            return work();
         fail('task_state_conflict');
+    }
     let ownsTransaction = false;
     try {
         db.exec('BEGIN IMMEDIATE');

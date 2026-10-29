@@ -94,6 +94,7 @@ export class DurableJobWorker {
                 owner: this.options.owner,
                 now: this.clock(),
                 leaseMs: this.leaseMs,
+                types: Object.keys(this.options.handlers),
             });
             if (!row)
                 break;

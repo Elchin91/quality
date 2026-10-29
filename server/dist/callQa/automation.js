@@ -1,3 +1,4 @@
+import { ordinarySourcePredicate } from '../qaPurpose.js';
 import { callDirectionSql } from '../callsDirectory/groups.js';
 import { unusableSql } from '../qaUnusable/unusable.js';
 import { callDurationSql, readCallQaPolicy } from './policy.js';
@@ -142,6 +143,7 @@ function candidateSourceIds(dependencies) {
         AND mappings.agent_id=records.agent_id AND mappings.status='confirmed'
        WHERE records.baku_date=?
          AND records.agent_id IS NOT NULL AND records.eligibility_status='eligible'
+         AND ${ordinarySourcePredicate(dependencies.db, 'call_source_records', 'records')}
          AND records.eligibility_decision_version=1 AND records.recording_locator IS NOT NULL
          AND ${callDirectionSql(dependencies.db, 'records')}
          AND ${duration.sql}

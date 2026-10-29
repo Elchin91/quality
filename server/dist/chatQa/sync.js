@@ -45,7 +45,7 @@ function customerContactOf(requests) {
     }
     return null;
 }
-function persistConversation(db, conversation, runId, now) {
+export function persistConversation(db, conversation, runId, now) {
     if (hasLegacyRequestOwner(db, conversation))
         return;
     const existing = db

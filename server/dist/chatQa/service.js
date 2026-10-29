@@ -1,3 +1,6 @@
+import { ordinarySourcePredicate, qaTaskPurpose } from '../qaPurpose.js';
+import { authorizeComplaintTask, } from '../complaints/taskAuthorization.js';
+import { ComplaintError } from '../complaints/types.js';
 import { AiReviewError, validateAiReview } from '../aiEvaluation/review.js';
 import { isUnusable } from '../qaUnusable/unusable.js';
 import { captureContactContext } from '../contactContext/context.js';
@@ -15,11 +18,22 @@ import { assignmentExplanation, reviewerReadiness, selectReviewerAndAdvance, } f
 import { ChatQaServiceError, addBakuCalendarDays, boundedText, fail, idFrom, invalidateRunningDraft, insertEvent, jsonArray, notify, nowFrom, ownedTask, policy, requireAdmin, resolveEvaluatedAgent, runImmediate, task, validateConversation, validatedCriteria, validatedNotes, } from './serviceSupport.js';
 export { cancelTask, reassignTask, startTask } from './taskLifecycle.js';
 export { ChatQaServiceError, addBakuCalendarDays, } from './serviceSupport.js';
+function complaintCatalog(input, row, normalized) {
+    return input.complaint && row.message_counts_verified_at == null
+        ? {
+            ...row,
+            client_message_count: normalized.clientMessageCount,
+            agent_message_count: normalized.agentMessageCount,
+        }
+        : row;
+}
 async function createTask(input) {
     if (input.db.inTransaction)
         fail('task_state_conflict');
     const reason = boundedText(input.reason, 2_000);
-    if (input.assignmentOrigin === 'manual')
+    if (input.complaint)
+        authorizeComplaintTask(input.db, input.complaint);
+    else if (input.assignmentOrigin === 'manual')
         requireAdmin(input.db, input.actorUserId ?? '');
     const initial = input.db
         .prepare('SELECT * FROM source_interactions WHERE id=?')
@@ -32,15 +46,18 @@ async function createTask(input) {
     let normalized;
     try {
         const loaded = await input.source.loadConversation(evidence);
+        const counted = input.complaint && initial.message_counts_verified_at == null
+            ? normalizeConversation(loaded)
+            : null;
         normalized = normalizeConversation(loaded, {
-            clientMeaningfulMessageCount: initial.client_message_count,
-            agentMeaningfulMessageCount: initial.agent_message_count,
+            clientMeaningfulMessageCount: counted?.clientMessageCount ?? initial.client_message_count,
+            agentMeaningfulMessageCount: counted?.agentMessageCount ?? initial.agent_message_count,
             distinctAgentCount: jsonArray(initial.external_agent_ids_json).length,
         });
-        validateConversation(initial, normalized);
+        validateConversation(complaintCatalog(input, initial, normalized), normalized);
     }
     catch (error) {
-        if (error instanceof ChatQaServiceError)
+        if (error instanceof ChatQaServiceError || error instanceof ComplaintError)
             throw error;
         fail('source_unavailable');
     }
@@ -57,14 +74,21 @@ async function createTask(input) {
         return runImmediate(input.db, () => {
             if (input.signal?.aborted)
                 fail('task_state_conflict');
-            if (input.assignmentOrigin === 'manual')
+            if (input.complaint)
+                authorizeComplaintTask(input.db, input.complaint);
+            else if (input.assignmentOrigin === 'manual')
                 requireAdmin(input.db, input.actorUserId ?? '');
             const interaction = input.db
                 .prepare('SELECT * FROM source_interactions WHERE id=?')
                 .get(input.interactionId);
             if (!interaction || interaction.conversation_id !== normalized.conversationId)
                 fail('not_found', 404);
-            validateConversation(interaction, normalized);
+            validateConversation(complaintCatalog(input, interaction, normalized), normalized);
+            if (input.assignmentOrigin === 'automatic' &&
+                !input.db
+                    .prepare(`SELECT 1 FROM source_interactions WHERE id=? AND ${ordinarySourcePredicate(input.db, 'source_interactions')}`)
+                    .get(interaction.id))
+                fail('source_unavailable');
             if (input.assignmentOrigin === 'automatic' &&
                 (interaction.eligibility_state !== 'eligible' ||
                     isUnusable(input.db, 'chat', interaction.id)))
@@ -95,10 +119,14 @@ async function createTask(input) {
                 fail('reviewer_unavailable');
             const explanation = assignmentExplanation(input.assignmentOrigin, selectedReviewer);
             const agentId = resolveEvaluatedAgent(input.db, normalized, input.evaluatedAgentId);
-            if (operatorMonthlyCapacity(input.db, agentId, interaction.completed_at_utc).remaining === 0)
+            if (input.complaint && agentId !== input.complaint.agentId)
+                fail('mapping_required');
+            if (!input.complaint &&
+                operatorMonthlyCapacity(input.db, agentId, interaction.completed_at_utc).remaining === 0)
                 fail('duplicate_task');
-            if (operatorChannelCapacity(input.db, agentId, interaction.completed_at_utc, 'chat')
-                .remaining === 0)
+            if (!input.complaint &&
+                operatorChannelCapacity(input.db, agentId, interaction.completed_at_utc, 'chat')
+                    .remaining === 0)
                 fail('duplicate_task');
             if (input.assignmentOrigin === 'automatic' && input.enforceRosterQuota) {
                 const reviewDay = previousBakuDay(now);
@@ -120,21 +148,26 @@ async function createTask(input) {
             input.db
                 .prepare(`INSERT INTO chat_qa_tasks
         (id,interaction_id,agent_id,reviewer_user_id,assignment_origin,status,policy_version,
-         assignment_reason,assignment_explanation,deadline_at,assigned_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,'assigned',?,?,?,?,?,?,?)`)
-                .run(taskId, interaction.id, agentId, selectedReviewer.userId, input.assignmentOrigin, settings.version, reason, explanation, addBakuCalendarDays(now, settings.sla_days).getTime(), nowMs, nowMs, nowMs);
+         assignment_reason,assignment_explanation,deadline_at,assigned_at,created_at,updated_at,purpose)
+        VALUES (?,?,?,?,?,'assigned',?,?,?,?,?,?,?,?)`)
+                .run(taskId, interaction.id, agentId, selectedReviewer.userId, input.assignmentOrigin, settings.version, reason, explanation, addBakuCalendarDays(now, settings.sla_days).getTime(), nowMs, nowMs, nowMs, input.complaint ? 'complaint' : 'regular');
             insertEvent(input.db, input.createId, taskId, input.actorUserId ?? null, 'assigned', null, 'assigned', reason, {
                 assignment_explanation: explanation,
                 open_workload: selectedReviewer.openWorkload,
                 effective_capacity: selectedReviewer.effectiveCapacity,
                 selection: input.assignmentOrigin === 'automatic' ? 'least_load_random' : 'manual_explicit',
             }, nowMs);
+            if (input.complaint)
+                input.db
+                    .prepare('UPDATE source_interactions SET message_counts_verified_at=? WHERE id=?')
+                    .run(nowMs, interaction.id);
+            input.complaint?.onCreated(taskId);
             notify(input.db, input.createId, selectedReviewer.userId, 'chat_qa_assigned', taskId, nowMs);
             return task(input.db, taskId);
         });
     }
     catch (error) {
-        if (error instanceof ChatQaServiceError)
+        if (error instanceof ChatQaServiceError || error instanceof ComplaintError)
             throw error;
         if (String(error).includes('UNIQUE constraint failed'))
             fail('duplicate_task');
@@ -146,6 +179,16 @@ export function createManualTask(input) {
 }
 export function createAutomaticTask(input) {
     return createTask({ ...input, assignmentOrigin: 'automatic' });
+}
+export function createComplaintChatTask(input) {
+    const { reviewerUserId } = authorizeComplaintTask(input.db, input.complaint);
+    return createTask({
+        ...input,
+        reviewerUserId,
+        actorUserId: input.complaint.actorUserId,
+        evaluatedAgentId: input.complaint.agentId,
+        assignmentOrigin: 'manual',
+    });
 }
 export { generateAiDraft } from './aiDraft.js';
 export function completeTask(input) {
@@ -174,6 +217,7 @@ export function completeTask(input) {
         const evaluationId = idFrom(input.createId);
         const contactInterval = retainedTranscriptInterval(interaction.transcript_json);
         const metadata = {
+            purpose: qaTaskPurpose(input.db, 'chat', current.id),
             source: interaction.source_system,
             contact_date: interaction.baku_date,
             contact_started_at: contactInterval.startedAt,
@@ -190,9 +234,9 @@ export function completeTask(input) {
         input.db
             .prepare(`INSERT INTO evaluations
       (id,agent_id,upload_id,transcription_id,source_text,score,criteria_json,criteria_notes_json,
-       source_metadata_json,source_ref,summary,strengths_json,improvements_json,type,status,evaluator_id,created_at)
-      VALUES (?,?,NULL,NULL,NULL,?,?,?,?,?,?,'[]','[]','chat','completed',?,?)`)
-            .run(evaluationId, current.agent_id, score, JSON.stringify(criteria), JSON.stringify(notes), JSON.stringify(metadata), `chat-qa:${interaction.id}`, overallNote, input.reviewerUserId, nowMs);
+       source_metadata_json,source_ref,summary,strengths_json,improvements_json,type,status,evaluator_id,created_at,purpose)
+      VALUES (?,?,NULL,NULL,NULL,?,?,?,?,?,?,'[]','[]','chat','completed',?,?,?)`)
+            .run(evaluationId, current.agent_id, score, JSON.stringify(criteria), JSON.stringify(notes), JSON.stringify(metadata), `chat-qa:${interaction.id}`, overallNote, input.reviewerUserId, nowMs, metadata.purpose);
         if (aiReview.mode === 'ai')
             recordAiReview(input.db, evaluationId, selectedDraft, {
                 ai_review: aiReview,

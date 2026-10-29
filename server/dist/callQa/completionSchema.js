@@ -1,3 +1,4 @@
+import { registerComplaintTaskAuthorization } from '../complaints/taskAuthorization.js';
 const completionAuthorization = new WeakSet();
 const registeredDatabases = new WeakSet();
 export function withCallQaCompletionAuthorization(db, work) {
@@ -20,6 +21,7 @@ export function registerCallQaCompletionAuthorization(db) {
 /** Install DB guards that make a completion event the only coherent task-link transition. */
 export function createCallQaScorecardGuards(db, evaluationSchemaReady) {
     registerCallQaCompletionAuthorization(db);
+    registerComplaintTaskAuthorization(db);
     const completedEventType = evaluationSchemaReady ? ",'completed'" : '';
     const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((column) => column.name));
     const actorSchemaReady = ['id', 'role', 'active', 'must_change_password'].every((column) => userColumns.has(column));
@@ -130,7 +132,10 @@ export function createCallQaScorecardGuards(db, evaluationSchemaReady) {
       NOT EXISTS(SELECT 1 FROM call_qa_tasks tasks WHERE tasks.id=NEW.task_id AND
         tasks.source_record_id=NEW.source_record_id AND (
         (NEW.event_type='assigned' AND tasks.status='assigned' AND
-         tasks.version=1 AND tasks.assignment_origin='manual' AND NEW.actor_role='admin' AND
+         tasks.version=1 AND tasks.assignment_origin='manual' AND
+         ((tasks.purpose='regular' AND NEW.actor_role='admin') OR
+          (tasks.purpose='complaint' AND NEW.actor_role IN ('admin','reviewer') AND
+           call_qa_complaint_authorized(NEW.actor_user_id)=1)) AND
          NEW.actor_user_id=tasks.assigned_by_user_id AND NEW.from_status IS NULL AND NEW.to_status='assigned' AND
          call_qa_safe_reason(NEW.reason)=1 AND NEW.reason IS tasks.assignment_reason AND
          json_type(NEW.metadata_json,'$.assignment_explanation')='text' AND

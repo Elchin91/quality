@@ -68,6 +68,9 @@ import { createQaAutomationRouter } from './routes/qa-automation.js';
 import { runQaAutomationCycle } from './jobs/qaAutomationCycle.js';
 import { createCallsDirectorySyncer } from './callsDirectory/runtime.js';
 import { searchConfluence } from './confluence.js';
+import { createComplaintsRuntime } from './complaints/runtime.js';
+import { createComplaintsRouter } from './complaints/router.js';
+import { createComplaintMediaRouter } from './complaints/media.js';
 export const app = express();
 const careSync = getCareSyncCoordinator(db);
 const callsDirectory = createCallsDirectorySyncer(db, process.env);
@@ -115,6 +118,12 @@ export const callQaRuntime = createCallQaRuntime({
     generateDraft: ({ prompt, system, signal, generation_options }) => generateJsonWithMetadata(prompt, system, { ...generation_options, signal }),
 });
 setCallQaReadinessProvider(callQaRuntime.status);
+export const complaintsRuntime = createComplaintsRuntime({
+    db,
+    env: process.env,
+    chatSource: () => chatQaRuntime.getOrConnectSource(),
+    calls: callQaRuntime.complaints,
+});
 function listenPort(value) {
     if (value === undefined || value.trim() === '')
         return 8787;
@@ -225,6 +234,8 @@ app.use('/api', createReviewerDashboardRouter({ db }));
 app.use('/api', createContactContextRouter({ db }));
 app.use('/api', createCallQaPolicyRouter({ db }));
 app.use('/api', createQaUnusableRouter({ db }));
+app.use('/api', createComplaintMediaRouter(db, uploadsDir));
+app.use('/api', createComplaintsRouter(complaintsRuntime.routerOptions));
 app.use('/api', createChatContextRouter({
     db,
     source: () => chatQaRuntime.getOrConnectSource(),
@@ -317,6 +328,7 @@ const closeResources = createShutdownCoordinator({
     runtime: {
         close: async () => {
             await careSync.stop();
+            await complaintsRuntime.close();
             await callQaRuntime.close();
             await chatQaRuntime.close();
         },
@@ -354,6 +366,7 @@ server.once('listening', () => {
         dataDirSource: dataDirResolution.source,
     }, 'AgentScore backend listening');
     careSync.start();
+    complaintsRuntime.start();
     void chatQaRuntime.start().catch((error) => {
         logger.error({ err: error }, 'Chat QA runtime failed to start');
     });

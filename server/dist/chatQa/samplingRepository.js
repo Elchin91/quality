@@ -1,3 +1,4 @@
+import { ordinarySourcePredicate, regularTaskPredicate } from '../qaPurpose.js';
 import { unusableSql } from '../qaUnusable/unusable.js';
 import { listReviewerReadiness } from '../reviewerAssignment/repository.js';
 const BAKU_OFFSET_MS = 4 * 60 * 60 * 1_000;
@@ -22,6 +23,7 @@ export function samplingInput(db, now) {
         .prepare(`SELECT id,conversation_id,agent_id,completed_at_utc,channels_json,
         external_agent_ids_json,eligibility_state
     FROM source_interactions WHERE eligibility_state='eligible' AND agent_id IS NOT NULL
+      AND ${ordinarySourcePredicate(db, 'source_interactions')}
       AND ${unusableSql(db, 'chat', 'source_interactions.id')}`)
         .all().map((row) => ({
         interactionId: row.id,
@@ -39,6 +41,7 @@ export function samplingInput(db, now) {
       SUM(CASE WHEN tasks.status='completed' THEN 1 ELSE 0 END) automaticCompletedCount
     FROM chat_qa_tasks tasks LEFT JOIN source_interactions records ON records.id=tasks.interaction_id
     WHERE tasks.assignment_origin='automatic' AND tasks.status<>'cancelled'
+      AND ${regularTaskPredicate(db, 'chat_qa_tasks', 'tasks')}
       AND tasks.agent_id IS NOT NULL AND tasks.agent_id<>''
       AND COALESCE(records.completed_at_utc,tasks.created_at)>=?
       AND COALESCE(records.completed_at_utc,tasks.created_at)<? GROUP BY tasks.agent_id`)

@@ -103,6 +103,9 @@ function persistPage(input, records, now, counters) {
             if (record.topicsUnavailable)
                 counters.topicsUnavailable += 1;
             upsert.run(id, sourceRef, String(record.recordingLocator.value), String(record.externalAgentId), record.externalAgentName, record.interval.startedAtUtc, record.interval.endedAtUtc, record.interval.bakuDate, record.interval.durationSeconds, agentId, record.callerLastFour, record.callerNumber, record.direction, record.queueLabel, record.sourceDurationSeconds, record.sourceUpdatedAtUtc, record.topicNames === null ? null : JSON.stringify(record.topicNames), record.endedBy, now, now, now, now);
+            if (input.complaintOnly && !existing.has(sourceRef)) {
+                input.db.prepare('UPDATE call_source_records SET complaint_only=1 WHERE id=?').run(id);
+            }
             publishCallSourceStatus(input.db, id, Date.parse(now));
             if (existing.has(sourceRef))
                 counters.updated += 1;
@@ -178,9 +181,12 @@ export async function syncCallCatalog(input) {
                 if (result.kind === 'ineligible') {
                     const reason = safeExclusionCode(result.code);
                     countExclusion(counters, reason);
-                    persistTrustedExclusion(input.db, result.sourceRef, reason, now);
+                    if (!input.complaintOnly)
+                        persistTrustedExclusion(input.db, result.sourceRef, reason, now);
                     continue;
                 }
+                if (input.acceptRecord && !input.acceptRecord(result.record))
+                    continue;
                 if (result.record.interval.bakuDate < input.bakuDateFrom ||
                     result.record.interval.bakuDate > input.bakuDateTo) {
                     countExclusion(counters, 'outside_baku_date');

@@ -1,3 +1,5 @@
+import { complaintTransactionAuthorized } from '../complaints/taskAuthorization.js';
+import { qaTaskPurpose } from '../qaPurpose.js';
 import { assignmentExplanation, reviewerReadiness } from '../reviewerAssignment/repository.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 import { enqueueQaRefill } from '../jobs/qaRefill.js';
@@ -24,6 +26,10 @@ export function reassignTask(input) {
     return runImmediate(input.db, () => {
         requireAdmin(input.db, input.actorUserId);
         const current = task(input.db, input.taskId);
+        // A complaint and its newly created QA work must move in one authorized handoff.
+        if (qaTaskPurpose(input.db, 'chat', current.id) === 'complaint' &&
+            !complaintTransactionAuthorized(input.db))
+            fail('task_state_conflict');
         if (!['assigned', 'in_progress'].includes(current.status))
             fail('task_state_conflict');
         if (current.reviewer_user_id === input.reviewerUserId)

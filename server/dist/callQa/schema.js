@@ -1,3 +1,5 @@
+import { registerComplaintTaskAuthorization } from '../complaints/taskAuthorization.js';
+import { migrateQaComplaintPurpose } from '../qaPurpose.js';
 import { createRecordingAccessGuards, migrateRecordingAccessTable, migrateRecordingUploadFilenames, recordingAccessTableSql, registerAccessValidation, } from './recordingAccessSchema.js';
 import { callSourceRecordsTableSql, migrateCallSourceEligibilityDefaults, registerEligibilityValidation, } from './eligibilitySchema.js';
 import { createCallQaScorecardGuards, registerCallQaCompletionAuthorization, } from './completionSchema.js';
@@ -36,6 +38,7 @@ export function registerCallQaValidationFunctions(db) {
  */
 export function registerCallQaRuntimeFunctions(db) {
     registerCallQaValidationFunctions(db);
+    registerComplaintTaskAuthorization(db);
     registerCallQaSystemAuthorization(db);
     registerCallQaCompletionAuthorization(db);
     registerAccessValidation(db);
@@ -357,5 +360,6 @@ export function createCallQaSchema(db) {
     if (!taskColumns.some(({ name }) => name === 'scorecard_kind')) {
         db.exec("ALTER TABLE call_qa_tasks ADD COLUMN scorecard_kind TEXT NOT NULL DEFAULT 'm10' CHECK(scorecard_kind IN ('m10','telesales'))");
     }
+    migrateQaComplaintPurpose(db);
     createCallQaScorecardGuards(db, evaluationSchemaReady);
 }

@@ -1,3 +1,4 @@
+import { regularTaskPredicate } from '../qaPurpose.js';
 import { assignCallQaTask, cancelCallQaTask } from '../callQa/service.js';
 import { reassignTask } from '../chatQa/taskLifecycle.js';
 import { listReviewerReadiness, REVIEWER_GROUPS } from './repository.js';
@@ -50,6 +51,7 @@ function movableTasks(db, group) {
         tasks.push(...db
             .prepare(`SELECT id,reviewer_user_id FROM chat_qa_tasks
              WHERE status='assigned' AND assignment_origin='automatic' AND reviewer_user_id IS NOT NULL
+               AND ${regularTaskPredicate(db, 'chat_qa_tasks')}
              ORDER BY assigned_at DESC,id DESC`)
             .all().map((row) => ({
             id: row.id,
@@ -63,6 +65,7 @@ function movableTasks(db, group) {
         tasks.push(...db
             .prepare(`SELECT id,reviewer_user_id,source_record_id,version,deadline_at_utc FROM call_qa_tasks
              WHERE status='assigned' AND assignment_origin='automatic' AND reviewer_user_id IS NOT NULL
+               AND ${regularTaskPredicate(db, 'call_qa_tasks')}
                AND scorecard_kind ${group === 'telesales' ? "='telesales'" : "<>'telesales'"}
              ORDER BY assigned_at_utc DESC,id DESC`)
             .all().map((row) => ({

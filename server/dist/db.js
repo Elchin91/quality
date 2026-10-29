@@ -1,4 +1,6 @@
 import { createAiEvaluationSchema } from './aiEvaluation/persistence.js';
+import { createComplaintsSchema } from './complaints/schema.js';
+import { createComplaintDiscoverySchema } from './complaints/discovery.js';
 import Database from 'better-sqlite3';
 import { enforceOneTranscriptionPerUpload, enforceOneUserPerAgent, createAppealSchema, createEvaluationReviewSchema, generalizeNotifications, migrateEvaluationSourceTextNullable, migrateUserRoles, migrateOllamaDefault, } from './dbMigrations.js';
 import { createCallQaSchema } from './callQa/schema.js';
@@ -284,6 +286,8 @@ enforceOneTranscriptionPerUpload(db);
 enforceOneUserPerAgent(db);
 createAppEventSchema(db);
 createDurableJobSchema(db);
+createComplaintsSchema(db);
+createComplaintDiscoverySchema(db);
 createQaPolicySchema(db);
 createM10ImportSchema(db);
 createConfluenceIndexSchema(db);

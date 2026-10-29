@@ -1,3 +1,4 @@
+import { ordinarySourcePredicate } from '../qaPurpose.js';
 import { directoryGroupOf, expectedCallDirection } from '../callsDirectory/groups.js';
 import { isUnusable } from '../qaUnusable/unusable.js';
 import { callTaskDeadline } from './policy.js';
@@ -131,6 +132,10 @@ export function assignAutomaticCallQaTask(input) {
             if (signal?.aborted)
                 fail('task_state_conflict');
             const source = eligibleSource(db, sourceRecordId);
+            if (!db
+                .prepare(`SELECT 1 FROM call_source_records WHERE id=? AND ${ordinarySourcePredicate(db, 'call_source_records')}`)
+                .get(sourceRecordId))
+                fail('source_ineligible');
             const evaluationsExist = db
                 .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evaluations'")
                 .get();
