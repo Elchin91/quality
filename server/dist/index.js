@@ -119,7 +119,7 @@ export const callQaRuntime = createCallQaRuntime({
     generateDraft: ({ prompt, system, signal, generation_options }) => generateJsonWithMetadata(prompt, system, { ...generation_options, signal }),
 });
 setCallQaReadinessProvider(callQaRuntime.status);
-const complaintChatSource = createComplaintChatSource(process.env, () => chatQaRuntime.getOrConnectSource());
+const complaintChatSource = createComplaintChatSource(process.env);
 export const complaintsRuntime = createComplaintsRuntime({
     db,
     env: process.env,

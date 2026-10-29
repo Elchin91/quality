@@ -157,10 +157,33 @@ export class CallsChatHttpTransport {
         });
         return this.loginPromise;
     }
+    /** Cancel this waiter without interrupting the shared login needed by other operations. */
+    async authenticationFor(signal) {
+        if (!signal)
+            return this.authenticate();
+        if (signal.aborted)
+            throw new SourceDiagnosticError('source_connection_failed');
+        let onAbort;
+        try {
+            return await Promise.race([
+                this.authenticate(),
+                new Promise((_resolve, reject) => {
+                    onAbort = () => reject(new SourceDiagnosticError('source_connection_failed'));
+                    signal.addEventListener('abort', onAbort, { once: true });
+                    if (signal.aborted)
+                        onAbort();
+                }),
+            ]);
+        }
+        finally {
+            if (onAbort)
+                signal.removeEventListener('abort', onAbort);
+        }
+    }
     async request(method, path, body, signal) {
         // Literal route and parameter validation prevents a caller from adding source writes.
         const allowed = method === 'POST'
-            ? path === '/api/profile/request/searchRequest'
+            ? path === '/api/profile/request/searchRequest' || path === '/api/report/callReportByDate'
             : path === '/api/users/all' ||
                 /^\/api\/users\/filterSearch\?search=&page=\d{1,3}&size=200$/.test(path) ||
                 /^\/api\/profile\/request\/requestById\?requestId=[0-9a-f-]{36}$/.test(path) ||
@@ -171,14 +194,14 @@ export class CallsChatHttpTransport {
         if (this.abort.signal.aborted)
             throw new SourceDiagnosticError('source_connection_failed');
         signal?.throwIfAborted();
-        let token = await this.authenticate();
+        let token = await this.authenticationFor(signal);
         signal?.throwIfAborted();
         let response = await this.withRetry(() => this.json(method, path, body, token, signal), signal);
         if (response.status === 401) {
             if (this.token?.value === token)
                 this.token = null;
             signal?.throwIfAborted();
-            token = await this.authenticate();
+            token = await this.authenticationFor(signal);
             signal?.throwIfAborted();
             response = await this.withRetry(() => this.json(method, path, body, token, signal), signal);
         }

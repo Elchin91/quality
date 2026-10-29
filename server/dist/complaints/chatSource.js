@@ -1,8 +1,9 @@
-import { loadChatSourceConfig } from '../chatQa/sourceConfig.js';
-import { createChatSourceClient } from '../chatQa/sourceClient.js';
-import { createComplaintMysqlSource } from './mysqlSource.js';
-/** Interactive complaint lookup must not scan or change the regular sampling source. */
-export function createComplaintChatSource(env, fallback, create = (config) => createComplaintMysqlSource(config, createChatSourceClient(config))) {
+import { loadRecordingConfig } from '../callQa/recordingConfig.js';
+import { loadHttpCatalogOptions } from '../chatQa/sourceConfig.js';
+import { ComplaintHttpChatSourceClient } from './httpChatSource.js';
+import { CallsChatHttpTransport } from '../chatQa/httpTransport.js';
+/** Complaints use their own bounded HTTP metadata source, independent of regular QA backends. */
+export function createComplaintChatSource(env, create) {
     let source = null;
     let closed = false;
     return {
@@ -13,14 +14,29 @@ export function createComplaintChatSource(env, fallback, create = (config) => cr
                 return source;
             let config;
             try {
-                config = loadChatSourceConfig(env);
+                const recording = loadRecordingConfig(env);
+                config = {
+                    ...recording,
+                    timeoutMs: Math.min(recording.timeoutMs, 15_000),
+                    maxBytes: Math.min(recording.maxBytes, 4_000_000),
+                };
             }
             catch {
-                return fallback();
+                return null;
             }
-            if (!config || config.backend !== 'mysql')
-                return fallback();
-            source = create(config);
+            if (create)
+                source = create(config);
+            else {
+                const options = loadHttpCatalogOptions({
+                    ...env,
+                    CHAT_HTTP_PAGE_SIZE: env.CHAT_HTTP_PAGE_SIZE?.trim() || '500',
+                });
+                const transport = new CallsChatHttpTransport(config, {
+                    concurrency: options.concurrency,
+                    retryDelaysMs: [],
+                });
+                source = new ComplaintHttpChatSourceClient(config, { transport });
+            }
             return source;
         },
         async close() {

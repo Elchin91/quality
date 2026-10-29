@@ -3,7 +3,7 @@ import { createCallQaAutomation } from './automation.js';
 import { refineCallQaTask } from './refinement.js';
 import path from 'node:path';
 import { createSecretKey } from 'node:crypto';
-import { loadChatSourceConfig, loadHttpCatalogOptions } from '../chatQa/sourceConfig.js';
+import { loadChatSourceConfig } from '../chatQa/sourceConfig.js';
 import { listCallCatalog } from './catalog.js';
 import { createMongoCallSourceAdapter } from './mongoSource.js';
 import { createMysqlCallSourceAdapter } from './mysqlSource.js';
@@ -19,7 +19,7 @@ import { createCallQaReadiness } from './readiness.js';
 import { CallRecordingStore } from './recordingStore.js';
 import { CallRecordingCache, recordingCacheSettings } from './recordingCache.js';
 import { getReviewerCallQaTask, listReviewerCallQaTasks } from './queries.js';
-import { discoverCallContacts } from '../complaints/discoverySources.js';
+import { createComplaintCallDiscovery } from '../complaints/callSource.js';
 import { assignCallQaTask, CallQaServiceError, cancelCallQaTask, completeCallQaTask, generateCallQaAiDraft, startCallQaTask, } from './service.js';
 import { callSourceConfigFromChatSource } from './sourceConfig.js';
 import { syncCallCatalog } from './sync.js';
@@ -151,7 +151,11 @@ export function createCallQaRuntime(options) {
     const recordingClient = state.recordingConfig
         ? new CallsRecordingClient(state.recordingConfig)
         : null;
-    let complaintSource = null;
+    const complaintCalls = createComplaintCallDiscovery({
+        db: options.db,
+        env: options.env,
+        normalizationProtection: options.normalizationProtection,
+    });
     let recordingStore = null;
     if (state.recordingConfig) {
         try {
@@ -440,21 +444,7 @@ export function createCallQaRuntime(options) {
         status,
         automation,
         complaints: {
-            discover: async (window, phone, signal, onProgress) => {
-                if (!source || !state.normalizationProtection)
-                    throw new Error('source_unavailable');
-                if (state.recordingConfig && !complaintSource)
-                    complaintSource = createHttpCallSourceAdapter(state.recordingConfig, loadHttpCatalogOptions(options.env));
-                return discoverCallContacts({
-                    db: options.db,
-                    source: complaintSource ?? source,
-                    normalizationProtection: state.normalizationProtection,
-                    window,
-                    phone,
-                    signal,
-                    onProgress,
-                });
-            },
+            discover: complaintCalls.discover,
             prepare: async (sourceId, signal) => {
                 const row = options.db
                     .prepare('SELECT recording_locator FROM call_source_records WHERE id=?')
@@ -476,6 +466,7 @@ export function createCallQaRuntime(options) {
             },
         },
         close: async () => {
+            complaintCalls.close();
             await cache?.close();
         },
     };

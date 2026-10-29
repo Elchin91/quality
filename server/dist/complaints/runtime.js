@@ -59,7 +59,7 @@ export function createComplaintsRuntime(input) {
     const discoveryWorker = new DurableJobWorker({
         repository: jobs,
         owner: `complaint-discovery-${process.pid}`,
-        concurrency: 1,
+        concurrency: 2,
         handlerTimeoutMs: timeoutMs + 5000,
         handlers: { complaint_discovery: createDiscoveryHandler({ ...input, timeoutMs }) },
     });
