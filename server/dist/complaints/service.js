@@ -18,6 +18,7 @@ const completeSchema = z
     version,
     conclusion: z.string().trim().min(1).max(20_000),
     outcome: z.enum(['evaluated', 'contact_not_found', 'cannot_evaluate']),
+    discovery_job_id: z.string().min(1).max(128).optional(),
     reason: z.string().trim().max(2000).optional(),
 })
     .strict();
@@ -84,14 +85,20 @@ export function completeComplaint(db, id, actor, body, now) {
         if (values.outcome === 'cannot_evaluate' && !values.reason)
             throw new ComplaintError('complaint_reason_required');
         if (values.outcome === 'contact_not_found') {
-            if (!normalizeComplaintPhone(complaint.customer_phone))
-                throw new ComplaintError('customer_phone_missing', 409);
             const hasTable = db
                 .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='complaint_discovery'")
                 .get();
             const discovery = hasTable
                 ? db.prepare('SELECT * FROM complaint_discovery WHERE complaint_id=?').get(id)
                 : undefined;
+            const primaryPhone = normalizeComplaintPhone(complaint.customer_phone);
+            const searchedPhone = normalizeComplaintPhone(discovery?.phone) ?? primaryPhone;
+            if (!searchedPhone)
+                throw new ComplaintError('customer_phone_missing', 409);
+            if ((values.discovery_job_id !== undefined &&
+                values.discovery_job_id !== discovery?.job_id) ||
+                (searchedPhone !== primaryPhone && !values.discovery_job_id))
+                throw new ComplaintError('complaint_discovery_incomplete', 409);
             let channels = {};
             try {
                 channels = JSON.parse(discovery?.channels_json ?? '{}');
@@ -105,7 +112,7 @@ export function completeComplaint(db, id, actor, body, now) {
                 throw new ComplaintError('complaint_discovery_incomplete', 409);
             if (evidence.length)
                 throw new ComplaintError('complaint_has_evidence', 409);
-            if (complaintCandidates(db, complaint, discovery.from_date, discovery.to_date, Boolean(discovery.default_window)).items.length)
+            if (complaintCandidates(db, complaint, discovery.from_date, discovery.to_date, Boolean(discovery.default_window), searchedPhone).items.length)
                 throw new ComplaintError('complaint_contacts_found', 409);
         }
         db.prepare(`UPDATE complaints SET status='completed',outcome=?,conclusion=?,outcome_reason=?,completed_at=?,

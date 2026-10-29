@@ -6,7 +6,7 @@ import { loadComplaintsConfig } from './config.js';
 import { createComplaintSync } from './sync.js';
 import { complaintCandidates, complaintSearchWindow, discoveryState, } from './discovery.js';
 import { createDiscoveryHandler } from './discoveryRunner.js';
-import { normalizeComplaintPhone } from './phone.js';
+import { normalizeComplaintPhone, resolveComplaintPhone } from './phone.js';
 import { assertComplaintVersion, complaintDetail, requireComplaint } from './repository.js';
 import { ComplaintError } from './types.js';
 import { createComplaintTask, reassignComplaintWork } from './taskBridge.js';
@@ -18,6 +18,7 @@ const discoveryBody = z
     to: date.optional(),
     default_window: z.boolean().optional(),
     version: z.number().int().positive(),
+    phone: z.string().max(64).optional(),
 })
     .strict();
 const taskBody = z
@@ -26,6 +27,7 @@ const taskBody = z
     source_id: z.string().min(1).max(128),
     agent_id: z.string().min(1).max(128),
     version: z.number().int().positive(),
+    phone: z.string().max(64).optional(),
     task_id: z.string().max(128).optional(),
     evaluation_id: z.string().max(128).optional(),
 })
@@ -87,6 +89,9 @@ export function createComplaintsRuntime(input) {
     const createTask = async ({ complaint, actor, body, }) => {
         const values = parse(taskBody, body);
         assertComplaintVersion(complaint, values.version);
+        const chosenPhone = resolveComplaintPhone(values.phone, complaint.customer_phone);
+        if (!chosenPhone)
+            throw new ComplaintError('customer_phone_missing', 409);
         const sourceColumn = values.channel === 'call' ? 'source_record_id' : 'interaction_id';
         const existingTask = db
             .prepare(`SELECT 1 FROM ${values.channel}_qa_tasks WHERE ${sourceColumn}=? AND status<>'cancelled'`)
@@ -116,9 +121,7 @@ export function createComplaintsRuntime(input) {
             const phone = db
                 .prepare('SELECT caller_number FROM call_source_records WHERE id=?')
                 .get(values.source_id);
-            if (!phone ||
-                normalizeComplaintPhone(phone.caller_number) !==
-                    normalizeComplaintPhone(complaint.customer_phone))
+            if (!phone || normalizeComplaintPhone(phone.caller_number) !== chosenPhone)
                 throw new ComplaintError('source_mismatch', 409);
             const existing = db
                 .prepare("SELECT 1 FROM call_qa_tasks WHERE source_record_id=? AND status<>'cancelled'")
@@ -143,6 +146,7 @@ export function createComplaintsRuntime(input) {
             sourceId: values.source_id,
             agentId: values.agent_id,
             version: values.version,
+            phone: chosenPhone,
             chatSource: source ?? undefined,
             signal: life.signal,
         });
@@ -161,17 +165,19 @@ export function createComplaintsRuntime(input) {
         candidates: ({ complaint, query }) => {
             const range = parse(z
                 .object({
+                phone: z.string().max(64).optional(),
                 from: date.optional(),
                 to: date.optional(),
                 default_window: z.enum(['true', 'false']).optional(),
             })
                 .strict(), query);
-            return complaintCandidates(db, complaint, range.from, range.to, range.default_window === undefined ? undefined : range.default_window === 'true');
+            return complaintCandidates(db, complaint, range.from, range.to, range.default_window === undefined ? undefined : range.default_window === 'true', range.phone);
         },
         discovery: ({ complaint, actor, body }) => {
             const values = parse(discoveryBody, body);
             assertComplaintVersion(complaint, values.version);
-            if (!normalizeComplaintPhone(complaint.customer_phone))
+            const phone = resolveComplaintPhone(values.phone, complaint.customer_phone);
+            if (!phone)
                 throw new ComplaintError('customer_phone_missing', 409);
             const window = complaintSearchWindow(complaint.jira_created_at, values.from, values.to, values.default_window);
             return db
@@ -191,6 +197,7 @@ export function createComplaintsRuntime(input) {
                 const job = jobs.enqueue({
                     type: 'complaint_discovery',
                     payload: {
+                        phone,
                         complaint_id: complaint.id,
                         actor_user_id: actor.id,
                         from: window.from,
@@ -201,9 +208,9 @@ export function createComplaintsRuntime(input) {
                     now: Date.now(),
                     maxAttempts: 2,
                 });
-                db.prepare(`INSERT INTO complaint_discovery(complaint_id,job_id,from_date,to_date,status,channels_json,updated_at,default_window)
-          VALUES (?,?,?,?,'queued',?,?,?) ON CONFLICT(complaint_id) DO UPDATE SET job_id=excluded.job_id,
-          from_date=excluded.from_date,to_date=excluded.to_date,status='queued',channels_json=excluded.channels_json,updated_at=excluded.updated_at,default_window=excluded.default_window,deadline_at=NULL`).run(complaint.id, job.id, window.from, window.to, JSON.stringify({ call: { status: 'queued' }, chat: { status: 'queued' } }), Date.now(), window.defaultWindow ? 1 : 0);
+                db.prepare(`INSERT INTO complaint_discovery(complaint_id,job_id,from_date,to_date,status,channels_json,updated_at,default_window,phone)
+          VALUES (?,?,?,?,'queued',?,?,?,?) ON CONFLICT(complaint_id) DO UPDATE SET job_id=excluded.job_id,
+          from_date=excluded.from_date,to_date=excluded.to_date,status='queued',channels_json=excluded.channels_json,updated_at=excluded.updated_at,default_window=excluded.default_window,phone=excluded.phone,deadline_at=NULL`).run(complaint.id, job.id, window.from, window.to, JSON.stringify({ call: { status: 'queued' }, chat: { status: 'queued' } }), Date.now(), window.defaultWindow ? 1 : 0, phone);
                 return discoveryState(db, complaint.id);
             })
                 .immediate();

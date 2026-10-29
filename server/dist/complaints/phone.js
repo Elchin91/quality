@@ -1,3 +1,4 @@
+import { ComplaintError } from './types.js';
 /** Canonical digits, with Azerbaijani national formats expanded explicitly. */
 export function normalizeComplaintPhone(value) {
     if (typeof value !== 'string' || value.length > 64 || !/^\+?[\d\s().-]+$/u.test(value.trim()))
@@ -17,4 +18,13 @@ export function phoneContact(value, channels) {
         !channels.every((channel) => /^(whatsapp|phone|sipphone|call)$/iu.test(channel)))
         return null;
     return normalizeComplaintPhone(value);
+}
+/** Blank selects Jira's number; malformed explicit input must never silently fall back. */
+export function resolveComplaintPhone(value, fallback) {
+    if (value === undefined || (typeof value === 'string' && value.length <= 64 && !value.trim()))
+        return normalizeComplaintPhone(fallback);
+    const phone = normalizeComplaintPhone(value);
+    if (!phone)
+        throw new ComplaintError('invalid_input');
+    return phone;
 }

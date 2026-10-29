@@ -4,10 +4,10 @@ import { reassignTask } from '../chatQa/taskLifecycle.js';
 import { cancelCallQaTask, createComplaintCallTask } from '../callQa/service.js';
 import { qaTaskPurpose } from '../qaPurpose.js';
 import { authorizeComplaintTask, withComplaintTaskAuthorization, } from './taskAuthorization.js';
-import { normalizeComplaintPhone, phoneContact } from './phone.js';
+import { normalizeComplaintPhone, phoneContact, resolveComplaintPhone } from './phone.js';
 import { ComplaintError, } from './types.js';
 function matchContact(input, complaint) {
-    const phone = normalizeComplaintPhone(complaint.customer_phone);
+    const phone = resolveComplaintPhone(input.phone, complaint.customer_phone);
     if (!phone)
         throw new ComplaintError('customer_phone_missing', 409);
     if (input.channel === 'call') {
@@ -74,12 +74,31 @@ function writeLink(input, context, task, evaluationId, kind) {
         .run(nanoid(12), input.complaintId, input.actorUserId, JSON.stringify({ evidence_id: evidence.id, channel: input.channel, link_kind: kind }), now);
     return evidence;
 }
+/** Preserve the source instance and capabilities while checking fresh metadata before persistence. */
+function sourceForPhone(source, phone) {
+    const load = async (evidence, signal) => {
+        const conversation = await source.loadConversation(evidence, signal);
+        if (conversation.requests.some((request) => request.customerContact != null &&
+            phoneContact(request.customerContact, [request.communicationType ?? '']) !== phone))
+            throw new ComplaintError('source_not_found', 404);
+        return conversation;
+    };
+    return new Proxy(source, {
+        get(target, property) {
+            if (property === 'loadConversation')
+                return load;
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+        },
+    });
+}
 /** Existing evaluations are evidence only: their reviewer, score and quota purpose never change. */
 export async function createComplaintTask(input) {
     if (!['chat', 'call'].includes(input.channel) ||
         !Number.isSafeInteger(input.version) ||
         input.version < 1)
         throw new ComplaintError('invalid_input');
+    input = { ...input };
     input.signal?.throwIfAborted();
     let linked;
     const context = {
@@ -94,6 +113,10 @@ export async function createComplaintTask(input) {
     const existing = input.db
         .transaction(() => {
         const { complaint } = authorizeComplaintTask(input.db, context);
+        const chosenPhone = resolveComplaintPhone(input.phone, complaint.customer_phone);
+        if (!chosenPhone)
+            throw new ComplaintError('customer_phone_missing', 409);
+        input.phone = chosenPhone;
         matchContact(input, complaint);
         const prior = input.db
             .prepare(`SELECT * FROM complaint_evidence WHERE complaint_id=? AND channel=?
@@ -136,7 +159,7 @@ export async function createComplaintTask(input) {
             throw new ComplaintError('source_unavailable', 503);
         await createComplaintChatTask({
             db: input.db,
-            source: input.chatSource,
+            source: sourceForPhone(input.chatSource, input.phone),
             interactionId: input.sourceId,
             reviewerUserId: auth.reviewerUserId,
             actorUserId: input.actorUserId,

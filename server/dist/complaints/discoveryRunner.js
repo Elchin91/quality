@@ -2,7 +2,7 @@ import { SOURCE_DIAGNOSTICS, sourceDiagnosticFromError } from '../chatQa/sourceD
 import { boundedOperation } from '../jobs/boundedOperation.js';
 import { complaintSearchWindow, discoveryOutcome, } from './discovery.js';
 import { discoverChatContacts } from './discoverySources.js';
-import { normalizeComplaintPhone } from './phone.js';
+import { resolveComplaintPhone } from './phone.js';
 import { requireComplaint } from './repository.js';
 import { ComplaintError } from './types.js';
 function safeError(error) {
@@ -61,7 +61,7 @@ export function createDiscoveryHandler(input) {
             });
             if (complaint.status === 'completed')
                 throw new ComplaintError('complaint_completed', 409);
-            const phone = normalizeComplaintPhone(complaint.customer_phone);
+            const phone = resolveComplaintPhone(payload.phone, complaint.customer_phone);
             if (!phone)
                 throw new ComplaintError('customer_phone_missing', 409);
             const window = complaintSearchWindow(complaint.jira_created_at, payload.from, payload.to, payload.default_window);

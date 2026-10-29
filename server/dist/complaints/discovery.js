@@ -1,5 +1,5 @@
 import { ComplaintError } from './types.js';
-import { normalizeComplaintPhone, phoneContact } from './phone.js';
+import { normalizeComplaintPhone, phoneContact, resolveComplaintPhone } from './phone.js';
 const DAY = 86_400_000;
 export function createComplaintDiscoverySchema(db) {
     for (const table of ['call_source_records', 'source_interactions']) {
@@ -16,6 +16,8 @@ export function createComplaintDiscoverySchema(db) {
     const columns = db.prepare('PRAGMA table_info(complaint_discovery)').all();
     if (!columns.some((column) => column.name === 'default_window'))
         db.exec('ALTER TABLE complaint_discovery ADD COLUMN default_window INTEGER NOT NULL DEFAULT 0 CHECK(default_window IN (0,1))');
+    if (!columns.some((column) => column.name === 'phone'))
+        db.exec('ALTER TABLE complaint_discovery ADD COLUMN phone TEXT');
     if (!columns.some((column) => column.name === 'deadline_at'))
         db.exec('ALTER TABLE complaint_discovery ADD COLUMN deadline_at INTEGER');
 }
@@ -47,6 +49,8 @@ export function discoveryState(db, complaintId) {
         .get(complaintId);
     if (!row)
         return {
+            phone: null,
+            job_id: null,
             status: 'idle',
             from: null,
             to: null,
@@ -85,6 +89,8 @@ export function discoveryState(db, complaintId) {
         }
     }
     return {
+        phone: row.phone ?? null,
+        job_id: row.job_id ?? null,
         status: row.status,
         from: row.from_date,
         to: row.to_date,
@@ -105,9 +111,9 @@ export function discoveryOutcome(channels) {
 function tableExists(db, name) {
     return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
 }
-export function complaintCandidates(db, complaint, from, to, defaultWindow) {
+export function complaintCandidates(db, complaint, from, to, defaultWindow, phoneOverride) {
     const window = complaintSearchWindow(complaint.jira_created_at, from, to, defaultWindow);
-    const phone = normalizeComplaintPhone(complaint.customer_phone);
+    const phone = resolveComplaintPhone(phoneOverride, complaint.customer_phone);
     const items = [];
     if (!phone)
         return { items, discovery: discoveryState(db, complaint.id) };

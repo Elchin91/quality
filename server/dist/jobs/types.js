@@ -30,6 +30,10 @@ export const JOB_PAYLOAD_SCHEMAS = {
         from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
         to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
         default_window: z.boolean().optional(),
+        phone: z
+            .string()
+            .regex(/^\d{10,15}$/u)
+            .optional(),
     })
         .strict(),
 };
