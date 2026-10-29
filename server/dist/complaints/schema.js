@@ -6,6 +6,7 @@ export function createComplaintsSchema(db) {
       jira_status TEXT NOT NULL, jira_status_category TEXT NOT NULL,
       jira_created_at INTEGER NOT NULL, jira_updated_at INTEGER NOT NULL, jira_resolved_at INTEGER,
       reviewer_user_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
+      complained_agent_id TEXT REFERENCES agents(id) ON DELETE RESTRICT,
       status TEXT NOT NULL DEFAULT 'unassigned' CHECK(status IN ('unassigned','assigned','in_progress','completed')),
       outcome TEXT CHECK(outcome IN ('evaluated','contact_not_found','cannot_evaluate')),
       conclusion TEXT NOT NULL DEFAULT '', outcome_reason TEXT,
@@ -43,4 +44,7 @@ export function createComplaintsSchema(db) {
       last_count INTEGER NOT NULL DEFAULT 0
     );
   `);
+    const columns = db.prepare('PRAGMA table_info(complaints)').all();
+    if (!columns.some((column) => column.name === 'complained_agent_id'))
+        db.exec('ALTER TABLE complaints ADD COLUMN complained_agent_id TEXT REFERENCES agents(id) ON DELETE RESTRICT');
 }

@@ -69,6 +69,7 @@ import { runQaAutomationCycle } from './jobs/qaAutomationCycle.js';
 import { createCallsDirectorySyncer } from './callsDirectory/runtime.js';
 import { searchConfluence } from './confluence.js';
 import { createComplaintsRuntime } from './complaints/runtime.js';
+import { createComplaintChatSource } from './complaints/chatSource.js';
 import { createComplaintsRouter } from './complaints/router.js';
 import { createComplaintMediaRouter } from './complaints/media.js';
 export const app = express();
@@ -118,10 +119,11 @@ export const callQaRuntime = createCallQaRuntime({
     generateDraft: ({ prompt, system, signal, generation_options }) => generateJsonWithMetadata(prompt, system, { ...generation_options, signal }),
 });
 setCallQaReadinessProvider(callQaRuntime.status);
+const complaintChatSource = createComplaintChatSource(process.env, () => chatQaRuntime.getOrConnectSource());
 export const complaintsRuntime = createComplaintsRuntime({
     db,
     env: process.env,
-    chatSource: () => chatQaRuntime.getOrConnectSource(),
+    chatSource: () => complaintChatSource.get(),
     calls: callQaRuntime.complaints,
 });
 function listenPort(value) {
@@ -329,6 +331,7 @@ const closeResources = createShutdownCoordinator({
         close: async () => {
             await careSync.stop();
             await complaintsRuntime.close();
+            await complaintChatSource.close();
             await callQaRuntime.close();
             await chatQaRuntime.close();
         },

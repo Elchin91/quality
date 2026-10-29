@@ -1,11 +1,18 @@
 import { z } from 'zod';
 import { complaintReviewers, notifyComplaint } from './assignment.js';
-import { assertComplaintVersion, complaintDetail, complaintEvidence, recordComplaintEvent, requireComplaint, } from './repository.js';
+import { assertComplaintVersion, complaintDetail, complaintEvidence, recordComplaintEvent, requireComplaint, complainedAgentAvailable, } from './repository.js';
 import { ComplaintError } from './types.js';
 import { complaintCandidates } from './discovery.js';
 import { normalizeComplaintPhone } from './phone.js';
 const version = z.number().int().positive();
-const saveSchema = z.object({ version, conclusion: z.string().trim().max(20_000) }).strict();
+const saveSchema = z
+    .object({
+    version,
+    conclusion: z.string().trim().max(20_000).optional(),
+    complained_agent_id: z.string().min(1).max(128).nullable().optional(),
+})
+    .strict()
+    .refine((value) => value.conclusion !== undefined || value.complained_agent_id !== undefined);
 const completeSchema = z
     .object({
     version,
@@ -29,9 +36,20 @@ export function saveComplaint(db, id, actor, body, now) {
         .transaction(() => {
         const complaint = requireComplaint(db, id, actor);
         assertComplaintVersion(complaint, input.data.version);
-        db.prepare(`UPDATE complaints SET conclusion=?,status=CASE WHEN status='assigned' THEN 'in_progress' ELSE status END,
-      started_at=COALESCE(started_at,?),version=version+1 WHERE id=?`).run(input.data.conclusion, now, id);
-        recordComplaintEvent(db, id, actor.id, 'conclusion_saved', {}, now);
+        const selectedAgent = input.data.complained_agent_id === undefined
+            ? complaint.complained_agent_id
+            : input.data.complained_agent_id;
+        const selectionChanged = selectedAgent !== complaint.complained_agent_id;
+        if (selectionChanged &&
+            selectedAgent !== null &&
+            !complainedAgentAvailable(db, selectedAgent))
+            throw new ComplaintError('complained_agent_unavailable', 409);
+        db.prepare(`UPDATE complaints SET conclusion=?,complained_agent_id=?,status=CASE WHEN status='assigned' THEN 'in_progress' ELSE status END,
+      started_at=COALESCE(started_at,?),version=version+1 WHERE id=?`).run(input.data.conclusion ?? complaint.conclusion, selectedAgent, now, id);
+        if (input.data.conclusion !== undefined)
+            recordComplaintEvent(db, id, actor.id, 'conclusion_saved', {}, now);
+        if (selectionChanged)
+            recordComplaintEvent(db, id, actor.id, 'complained_agent_changed', { from: complaint.complained_agent_id, to: selectedAgent }, now);
         return complaintDetail(db, requireComplaint(db, id, actor));
     })
         .immediate();
@@ -59,6 +77,10 @@ export function completeComplaint(db, id, actor, body, now) {
                         .prepare("SELECT 1 FROM evaluations WHERE id=? AND agent_id=? AND status='completed' AND type=? AND source_ref=?")
                         .get(item.evaluation_id, item.agent_id, item.channel, `${item.channel}-qa:${item.source_id}`))))
             throw new ComplaintError('complaint_evaluation_required', 409);
+        if (values.outcome === 'evaluated' &&
+            complaint.complained_agent_id &&
+            !evidence.some((item) => item.agent_id === complaint.complained_agent_id))
+            throw new ComplaintError('complaint_agent_evaluation_required', 409);
         if (values.outcome === 'cannot_evaluate' && !values.reason)
             throw new ComplaintError('complaint_reason_required');
         if (values.outcome === 'contact_not_found') {

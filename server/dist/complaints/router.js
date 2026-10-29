@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { complaintReviewers } from './assignment.js';
-import { complaintDetail, complaintDto, requireComplaint } from './repository.js';
+import { complaintAgents, complaintDetail, complaintDto, requireComplaint } from './repository.js';
 import { completeComplaint, reassignComplaint, saveComplaint, } from './service.js';
 import { ComplaintError } from './types.js';
 const querySchema = z
@@ -99,6 +99,19 @@ export function createComplaintsRouter(options) {
         return { items, total, page: q.page, limit: q.limit };
     }));
     router.get('/complaints/:id', wrap((req) => complaintDetail(db, owned(req))));
+    router.get('/complaints/:id/agents', wrap((req) => {
+        owned(req);
+        const query = z
+            .object({
+            page: z.coerce.number().int().min(1).max(1_000_000).default(1),
+            limit: z.coerce.number().int().min(1).max(1000).default(1000),
+        })
+            .strict()
+            .safeParse(req.query);
+        if (!query.success)
+            throw new ComplaintError('invalid_input');
+        return complaintAgents(db, query.data.page, query.data.limit);
+    }));
     router.patch('/complaints/:id', wrap((req) => saveComplaint(db, owned(req).id, actor(req), req.body, now())));
     router.post('/complaints/:id/complete', wrap((req) => completeComplaint(db, owned(req).id, actor(req), req.body, now())));
     router.post('/complaints/:id/reassign', wrap((req) => reassignComplaint(db, owned(req).id, actor(req), req.body, now(), options.reassign)));

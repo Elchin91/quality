@@ -28,11 +28,32 @@ export function complaintDto(db, row) {
     const reviewer = row.reviewer_user_id
         ? db.prepare('SELECT name FROM users WHERE id=?').get(row.reviewer_user_id)
         : undefined;
+    const complainedAgent = row.complained_agent_id
+        ? db.prepare('SELECT name FROM agents WHERE id=?').get(row.complained_agent_id)
+        : undefined;
     return {
         ...row,
+        employee_name_raw: null,
         reviewer_name: reviewer?.name ?? null,
+        complained_agent_id: row.complained_agent_id ?? null,
+        complained_agent_name: complainedAgent?.name ?? null,
         jira_url: `https://jira.pashapay.az/browse/${encodeURIComponent(row.jira_key)}`,
     };
+}
+const eligibleAgent = `EXISTS(SELECT 1 FROM users u WHERE u.agent_id=a.id AND u.role='agent' AND u.active=1)`;
+export function complainedAgentAvailable(db, agentId) {
+    return Boolean(db.prepare(`SELECT 1 FROM agents a WHERE a.id=? AND ${eligibleAgent}`).get(agentId));
+}
+export function complaintAgents(db, page, limit) {
+    const total = db
+        .prepare(`SELECT COUNT(*) FROM agents a WHERE ${eligibleAgent}`)
+        .pluck()
+        .get();
+    const items = db
+        .prepare(`SELECT a.id,a.name FROM agents a WHERE ${eligibleAgent}
+    ORDER BY a.name COLLATE NOCASE,a.id LIMIT ? OFFSET ?`)
+        .all(limit, (page - 1) * limit);
+    return { items, total, page, limit };
 }
 export function complaintDetail(db, row) {
     return {

@@ -44,7 +44,7 @@ function textField(raw) {
 }
 export function createJiraClient(config, fetcher = fetch) {
     if (config.baseUrl !== 'https://jira.pashapay.az' ||
-        ![config.phoneField, config.employeeField, config.reasonField].every((field) => /^customfield_\d+$/.test(field)))
+        ![config.phoneField, config.reasonField].every((field) => /^customfield_\d+$/.test(field)))
         throw new ComplaintError('jira_invalid_config', 503);
     async function json(path, signal) {
         if (!config.token)
@@ -106,7 +106,6 @@ export function createJiraClient(config, fetcher = fetch) {
         'description',
         'status',
         config.phoneField,
-        config.employeeField,
         config.reasonField,
     ].join(',');
     async function hydrate(raw, signal) {
@@ -143,7 +142,8 @@ export function createJiraClient(config, fetcher = fetch) {
             jira_id: raw.id,
             jira_key: raw.key,
             customer_phone: normalizeComplaintPhone(raw.fields[config.phoneField]),
-            employee_name_raw: textField(raw.fields[config.employeeField]),
+            // "Name, surname" may identify the customer or the submitting operator.
+            employee_name_raw: null,
             reason: textField(raw.fields[config.reasonField]),
             description: raw.fields.description ?? null,
             jira_status: raw.fields.status.name,

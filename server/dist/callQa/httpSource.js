@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CallsSearchPager } from '../chatQa/callsSearch.js';
+import { CallsSearchPager, customerNumberMatches, requireCustomerNumber, } from '../chatQa/callsSearch.js';
 import { httpDate } from '../chatQa/httpContract.js';
 import { CallsChatHttpTransport } from '../chatQa/httpTransport.js';
 import { CALL_SOURCE_MAX_PAGE_SIZE, CALL_SOURCE_MAX_WINDOW_DAYS } from './sourceConfig.js';
@@ -34,14 +34,14 @@ const callRowSchema = z
 })
     .passthrough();
 /** Answered inbound m10 calls and answered outbound calls (Telesales); policy filters length. */
-export function httpCallRecord(raw) {
+export function httpCallRecord(raw, complaint = false) {
     const parsed = callRowSchema.safeParse(raw);
     if (!parsed.success)
         return null;
     const row = parsed.data;
     if (!row.requestSource?.call || row.status !== 'COMPLETED' || !row.agentId)
         return null;
-    const direction = row.type === 'in' && row.queueName === 'm10'
+    const direction = row.type === 'in' && (complaint || row.queueName === 'm10')
         ? 'in'
         : row.type === 'out' && (row.talkDuration ?? 0) >= MIN_OUTBOUND_TALK_SECONDS
             ? 'out'
@@ -70,7 +70,7 @@ export function httpCallRecord(raw) {
         externalAgentName: row.agent?.trim() || null,
         callerPhone: digits.length >= 4 ? digits : null,
         direction,
-        queueLabel: direction === 'in' ? 'm10' : (row.queueName?.trim() ?? null),
+        queueLabel: row.queueName?.trim() ?? null,
         sourceDurationSeconds: row.talkDuration ?? null,
         sourceUpdatedAt: end,
     };
@@ -92,19 +92,46 @@ function window(request) {
     return { start, end, offset: cursor ? Number(cursor[1]) : 0 };
 }
 /** Call catalog from the same Calls request search the chat catalog uses; no database access. */
-export function createHttpCallSourceAdapter(config, options = DEFAULT_OPTIONS, deps = {}) {
+export function createHttpCallSourceAdapter(config, options = DEFAULT_OPTIONS, deps = {}, customerNumber) {
+    if (customerNumber !== undefined)
+        requireCustomerNumber(customerNumber);
     const transport = deps.transport ?? new CallsChatHttpTransport(config, { concurrency: options.concurrency });
     const pager = new CallsSearchPager(transport, options);
     let cache = null;
+    let incomplete = false;
     return Object.freeze({
+        get lastCustomerIncomplete() {
+            return incomplete;
+        },
+        forCustomerNumber(phone) {
+            return createHttpCallSourceAdapter(config, options, { transport }, requireCustomerNumber(phone));
+        },
         async readPage(request) {
             const { start, end, offset } = window(request);
             const key = `${start.toISOString()}|${end.toISOString()}`;
             if (request.cursor === null || cache?.key !== key) {
-                const rows = await pager.readAll({ start, end: new Date(end.getTime() + COMPLETION_MARGIN_MS) }, request.signal);
+                incomplete = false;
+                const rows = await pager.readAll({ start, end: new Date(end.getTime() + COMPLETION_MARGIN_MS) }, request.signal, customerNumber);
                 const records = rows
-                    .map(httpCallRecord)
-                    .filter((record) => record !== null && record.talkStartedAt >= start && record.talkStartedAt < end)
+                    .map((raw) => {
+                    const record = httpCallRecord(raw, Boolean(customerNumber));
+                    if (customerNumber && !record) {
+                        const parsed = callRowSchema.safeParse(raw);
+                        if (!parsed.success)
+                            incomplete = true;
+                        const row = parsed.success ? parsed.data : null;
+                        if (row &&
+                            row.requestSource?.call &&
+                            row.status === 'COMPLETED' &&
+                            customerNumberMatches(row.number, customerNumber))
+                            incomplete = true;
+                    }
+                    return record;
+                })
+                    .filter((record) => record !== null &&
+                    record.talkStartedAt >= start &&
+                    record.talkStartedAt < end &&
+                    (!customerNumber || customerNumberMatches(record.callerPhone, customerNumber)))
                     .sort((a, b) => a.talkStartedAt.getTime() - b.talkStartedAt.getTime() ||
                     a.sourceRef.localeCompare(b.sourceRef));
                 cache = { key, records };

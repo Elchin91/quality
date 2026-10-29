@@ -7,6 +7,7 @@ import { CALL_SOURCE_EXCLUSION_CODES, } from './sourceTypes.js';
 import { normalizeCallInterval } from './time.js';
 import { suggestCallAgentMappings } from './syncMappings.js';
 import { publishCallSourceStatus } from './sourceEvents.js';
+import { SourceDiagnosticError } from '../chatQa/sourceDiagnostics.js';
 const DATE = /^\d{4}-\d{2}-\d{2}$/u;
 const SERVICE_FAILURE = 'call catalog synchronization failed';
 const DAY_MS = 86_400_000;
@@ -97,6 +98,15 @@ function persistPage(input, records, now, counters) {
         for (const record of records) {
             const sourceRef = String(record.sourceRef);
             const id = existing.get(sourceRef) ?? input.createId?.() ?? nanoid();
+            if (input.complaintOnly && existing.has(sourceRef)) {
+                // A complaint lookup must preserve regular sampling and recording decisions.
+                input.db
+                    .prepare(`UPDATE call_source_records SET caller_number=?
+            WHERE id=? AND (caller_number IS NULL OR trim(caller_number)='')`)
+                    .run(record.callerNumber, id);
+                counters.updated += 1;
+                continue;
+            }
             const agentId = mappings.get(String(record.externalAgentId)) ?? null;
             if (agentId === null)
                 counters.unmapped += 1;
@@ -202,8 +212,17 @@ export async function syncCallCatalog(input) {
             }
             if (signal.aborted)
                 throw new Error(SERVICE_FAILURE);
+            // Complaint progress checks the owning job lease before catalog side effects.
+            input.onProgress?.({
+                pagesDone: counters.pages,
+                count: counters.inserted + counters.updated,
+            });
             persistPage(input, accepted, now, counters);
             cursor = page.nextCursor;
+            input.onProgress?.({
+                pagesDone: counters.pages,
+                count: counters.inserted + counters.updated,
+            });
             if (cursor !== null) {
                 if (seenCursors.has(cursor))
                     throw new Error(SERVICE_FAILURE);
@@ -212,7 +231,9 @@ export async function syncCallCatalog(input) {
         } while (cursor !== null);
         return counters;
     }
-    catch {
+    catch (error) {
+        if (input.complaintOnly && error instanceof SourceDiagnosticError)
+            throw error;
         throw new Error(SERVICE_FAILURE);
     }
 }

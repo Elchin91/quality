@@ -5,7 +5,7 @@ import { DurableJobWorker } from '../jobs/worker.js';
 import { loadComplaintsConfig } from './config.js';
 import { createComplaintSync } from './sync.js';
 import { complaintCandidates, complaintSearchWindow, discoveryState, } from './discovery.js';
-import { discoverChatContacts } from './discoverySources.js';
+import { createDiscoveryHandler } from './discoveryRunner.js';
 import { normalizeComplaintPhone } from './phone.js';
 import { assertComplaintVersion, complaintDetail, requireComplaint } from './repository.js';
 import { ComplaintError } from './types.js';
@@ -42,10 +42,9 @@ export function createComplaintsRuntime(input) {
     const getJob = (id) => db.prepare('SELECT * FROM durable_jobs WHERE id=?').get(id);
     const life = new AbortController();
     let timer, started = false;
-    const persist = (id, jobId, status, channels) => db
-        .prepare(`UPDATE complaint_discovery
-    SET status=?,channels_json=?,updated_at=? WHERE complaint_id=? AND job_id=?`)
-        .run(status, JSON.stringify(channels), Date.now(), id, jobId);
+    const timeoutMs = input.discoveryTimeoutMs ?? 120_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 1_200_000)
+        throw new RangeError('invalid discovery deadline');
     const worker = new DurableJobWorker({
         repository: jobs,
         owner: `complaints-${process.pid}`,
@@ -55,76 +54,14 @@ export function createComplaintsRuntime(input) {
             complaint_sync: async () => {
                 await sync.run();
             },
-            complaint_discovery: async (payload, signal, context) => {
-                const row = db
-                    .prepare('SELECT job_id FROM complaint_discovery WHERE complaint_id=?')
-                    .get(payload.complaint_id);
-                if (!row)
-                    return;
-                const job = getJob(row.job_id);
-                if (!job || job.status !== 'running')
-                    return;
-                const channels = {
-                    call: { status: 'queued' },
-                    chat: { status: 'queued' },
-                };
-                try {
-                    const user = db
-                        .prepare('SELECT role FROM users WHERE id=?')
-                        .get(payload.actor_user_id);
-                    const complaint = requireComplaint(db, payload.complaint_id, {
-                        id: payload.actor_user_id,
-                        role: user?.role ?? '',
-                    });
-                    if (complaint.status === 'completed')
-                        throw new ComplaintError('complaint_completed', 409);
-                    const phone = normalizeComplaintPhone(complaint.customer_phone);
-                    if (!phone)
-                        throw new ComplaintError('customer_phone_missing', 409);
-                    const window = complaintSearchWindow(complaint.jira_created_at, payload.from, payload.to, payload.default_window);
-                    for (const channel of ['call', 'chat']) {
-                        context?.assertLease();
-                        signal.throwIfAborted();
-                        channels[channel] = { status: 'running' };
-                        persist(complaint.id, job.id, 'running', channels);
-                        try {
-                            if (channel === 'call')
-                                channels.call = await input.calls.discover(window, phone, signal);
-                            else {
-                                const source = await input.chatSource();
-                                if (!source)
-                                    throw new Error('source_unavailable');
-                                channels.chat = await discoverChatContacts({ db, source, window, phone, signal });
-                            }
-                        }
-                        catch {
-                            channels[channel] = { status: 'failed', error_code: 'source_unavailable' };
-                        }
-                        context?.assertLease();
-                        signal.throwIfAborted();
-                        persist(complaint.id, job.id, 'running', channels);
-                    }
-                    const statuses = Object.values(channels).map((channel) => channel.status);
-                    const status = statuses.every((value) => value === 'succeeded')
-                        ? 'succeeded'
-                        : statuses.every((value) => value === 'failed')
-                            ? 'failed'
-                            : 'partial';
-                    persist(complaint.id, job.id, status, channels);
-                }
-                catch (error) {
-                    if (!signal.aborted)
-                        persist(payload.complaint_id, row.job_id, 'failed', {
-                            call: {
-                                status: 'failed',
-                                error_code: error instanceof ComplaintError ? error.code : 'source_unavailable',
-                            },
-                            chat: { status: 'failed', error_code: 'source_unavailable' },
-                        });
-                    throw error;
-                }
-            },
         },
+    });
+    const discoveryWorker = new DurableJobWorker({
+        repository: jobs,
+        owner: `complaint-discovery-${process.pid}`,
+        concurrency: 1,
+        handlerTimeoutMs: timeoutMs + 5000,
+        handlers: { complaint_discovery: createDiscoveryHandler({ ...input, timeoutMs }) },
     });
     const enqueueSync = () => {
         if (!config.enabled)
@@ -132,7 +69,9 @@ export function createComplaintsRuntime(input) {
         if (!config.token)
             throw new ComplaintError('jira_not_configured', 503);
         const active = db
-            .prepare("SELECT id FROM durable_jobs WHERE type='complaint_sync' AND status IN ('queued','running','failed') AND attempts<max_attempts LIMIT 1")
+            .prepare(`SELECT id FROM durable_jobs WHERE type='complaint_sync' AND
+          (status IN ('queued','running') OR (status='failed' AND attempts<max_attempts
+          AND cancelled_at IS NULL AND cancellation_requested_at IS NULL)) LIMIT 1`)
             .get();
         if (active)
             return { ...sync.status(), running: true, job_id: active.id };
@@ -237,13 +176,17 @@ export function createComplaintsRuntime(input) {
             const window = complaintSearchWindow(complaint.jira_created_at, values.from, values.to, values.default_window);
             return db
                 .transaction(() => {
+                jobs.recoverExpired({ now: Date.now() });
                 const previous = db
                     .prepare('SELECT job_id FROM complaint_discovery WHERE complaint_id=?')
                     .get(complaint.id);
                 const prior = previous ? getJob(previous.job_id) : null;
                 if (prior &&
-                    ['queued', 'running', 'failed'].includes(prior.status) &&
-                    prior.attempts < prior.max_attempts)
+                    (['queued', 'running'].includes(prior.status) ||
+                        (prior.status === 'failed' &&
+                            prior.attempts < prior.max_attempts &&
+                            prior.cancelled_at === null &&
+                            prior.cancellation_requested_at === null)))
                     throw new ComplaintError('discovery_running', 409);
                 const job = jobs.enqueue({
                     type: 'complaint_discovery',
@@ -260,7 +203,7 @@ export function createComplaintsRuntime(input) {
                 });
                 db.prepare(`INSERT INTO complaint_discovery(complaint_id,job_id,from_date,to_date,status,channels_json,updated_at,default_window)
           VALUES (?,?,?,?,'queued',?,?,?) ON CONFLICT(complaint_id) DO UPDATE SET job_id=excluded.job_id,
-          from_date=excluded.from_date,to_date=excluded.to_date,status='queued',channels_json=excluded.channels_json,updated_at=excluded.updated_at,default_window=excluded.default_window`).run(complaint.id, job.id, window.from, window.to, JSON.stringify({ call: { status: 'queued' }, chat: { status: 'queued' } }), Date.now(), window.defaultWindow ? 1 : 0);
+          from_date=excluded.from_date,to_date=excluded.to_date,status='queued',channels_json=excluded.channels_json,updated_at=excluded.updated_at,default_window=excluded.default_window,deadline_at=NULL`).run(complaint.id, job.id, window.from, window.to, JSON.stringify({ call: { status: 'queued' }, chat: { status: 'queued' } }), Date.now(), window.defaultWindow ? 1 : 0);
                 return discoveryState(db, complaint.id);
             })
                 .immediate();
@@ -277,6 +220,7 @@ export function createComplaintsRuntime(input) {
                 return;
             started = true;
             worker.start();
+            discoveryWorker.start();
             if (config.enabled && config.token) {
                 enqueueSync();
                 timer = setInterval(() => {
@@ -295,7 +239,7 @@ export function createComplaintsRuntime(input) {
                 clearInterval(timer);
             life.abort();
             sync.close();
-            await worker.stop();
+            await Promise.all([worker.stop(), discoveryWorker.stop()]);
         },
     };
 }

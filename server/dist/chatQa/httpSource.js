@@ -80,6 +80,9 @@ export class HttpChatSourceClient {
     }
     /** Catalog metadata comes from search rows only; message bodies are read for sampled chats. */
     async listCompletedConversations(window, signal, progress) {
+        return this.listCatalog(window, signal, progress);
+    }
+    async listCatalog(window, signal, progress) {
         try {
             validateSourceWindow(window);
         }

@@ -145,6 +145,7 @@ export class DurableJobWorker {
             if (!handler)
                 throw new Error('unregistered job handler');
             await boundedOperation(controller.signal, this.handlerTimeoutMs, (signal) => handler(JSON.parse(row.payload_json), signal, {
+                jobId: row.id,
                 assertLease: () => {
                     const state = this.options.repository.leaseState(row.id, row.lease_token, this.clock());
                     if (state === 'lost')

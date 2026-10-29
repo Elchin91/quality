@@ -16,6 +16,24 @@ const pageSchemaFor = (size) => z.object({
     empty: z.boolean(),
 });
 export const pageIds = (page) => JSON.stringify(page.content.map((raw) => raw?.id ?? null));
+export function requireCustomerNumber(value) {
+    if (!/^\d{10,15}$/u.test(value))
+        throw new Error('invalid customer number');
+    return value;
+}
+/** The API number field is a substring filter; exact canonical identity is checked locally. */
+export function customerNumberMatches(value, customer) {
+    if (typeof value !== 'string' || !/^\+?[\d\s().-]+$/u.test(value.trim()))
+        return false;
+    let digits = value.replace(/\D/gu, '');
+    if (digits.startsWith('00'))
+        digits = digits.slice(2);
+    if (/^0\d{9}$/u.test(digits))
+        digits = `994${digits.slice(1)}`;
+    else if (/^\d{9}$/u.test(digits))
+        digits = `994${digits}`;
+    return digits === customer;
+}
 /** The Calls request search shared by the chat and call catalogs (chats and calls in one list). */
 export class CallsSearchPager {
     transport;
@@ -27,13 +45,23 @@ export class CallsSearchPager {
         this.pageSchema = pageSchemaFor(options.pageSize);
     }
     /** One page; fails closed when the source ignores the filter or paging is inconsistent. */
-    async search(window, number, dateField = 'completeDate', signal) {
+    async search(window, number, dateField = 'completeDate', signal, customerNumber) {
         const size = this.options.pageSize;
         // Whole source seconds, half-open windows. Callers validate row dates against the window too.
         const payload = {
             fullTextSearch: null,
             fieldName: null,
             fieldSet: {
+                ...(customerNumber
+                    ? {
+                        number: [
+                            requireCustomerNumber(customerNumber).startsWith('994') &&
+                                customerNumber.length === 12
+                                ? customerNumber.slice(3)
+                                : customerNumber,
+                        ],
+                    }
+                    : {}),
                 [dateField]: [
                     httpTimestamp(window.start),
                     httpTimestamp(new Date(window.end.getTime() - 1)),
@@ -57,14 +85,14 @@ export class CallsSearchPager {
         return result;
     }
     /** Every row of a window: parallel pages plus a front-boundary recheck for shifted paging. */
-    async readAll(window, signal) {
-        const first = await this.search(window, 0, 'completeDate', signal);
-        const rest = await mapWithConcurrency(Array.from({ length: Math.max(0, first.totalPages - 1) }, (_, i) => i + 1), this.options.concurrency, (number) => this.search(window, number, 'completeDate', signal), signal);
+    async readAll(window, signal, customerNumber) {
+        const first = await this.search(window, 0, 'completeDate', signal, customerNumber);
+        const rest = await mapWithConcurrency(Array.from({ length: Math.max(0, first.totalPages - 1) }, (_, i) => i + 1), this.options.concurrency, (number) => this.search(window, number, 'completeDate', signal, customerNumber), signal);
         const pages = [first, ...rest];
         for (const page of pages)
             identity(page.totalElements === first.totalElements);
         if (first.totalPages > 1) {
-            const again = await this.search(window, 0, 'completeDate', signal);
+            const again = await this.search(window, 0, 'completeDate', signal, customerNumber);
             identity(again.totalElements === first.totalElements && pageIds(again) === pageIds(first));
         }
         const rows = pages.flatMap((page) => page.content);

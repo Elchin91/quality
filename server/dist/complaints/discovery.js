@@ -16,6 +16,8 @@ export function createComplaintDiscoverySchema(db) {
     const columns = db.prepare('PRAGMA table_info(complaint_discovery)').all();
     if (!columns.some((column) => column.name === 'default_window'))
         db.exec('ALTER TABLE complaint_discovery ADD COLUMN default_window INTEGER NOT NULL DEFAULT 0 CHECK(default_window IN (0,1))');
+    if (!columns.some((column) => column.name === 'deadline_at'))
+        db.exec('ALTER TABLE complaint_discovery ADD COLUMN deadline_at INTEGER');
 }
 export function complaintSearchWindow(createdAt, from, to, defaultWindow = from === undefined && to === undefined) {
     if (!Number.isSafeInteger(createdAt) || !Number.isFinite(new Date(createdAt).getTime()))
@@ -48,14 +50,57 @@ export function discoveryState(db, complaintId) {
             status: 'idle',
             from: null,
             to: null,
+            updated_at: 0,
+            deadline_at: null,
+            can_retry: true,
             channels: { call: { status: 'idle' }, chat: { status: 'idle' } },
         };
+    const job = tableExists(db, 'durable_jobs')
+        ? db.prepare('SELECT * FROM durable_jobs WHERE id=?').get(row.job_id)
+        : undefined;
+    const now = Date.now();
+    const cancelled = Boolean(job && (job.cancellation_requested_at !== null || job.cancelled_at !== null));
+    const live = job?.status === 'running' && (job.lease_expires_at ?? 0) > now;
+    const retrying = !cancelled &&
+        job &&
+        job.attempts < job.max_attempts &&
+        (job.status === 'failed' || (job.status === 'running' && !live));
+    const queued = !cancelled && job?.status === 'queued';
+    const channels = JSON.parse(row.channels_json);
+    if (['queued', 'running'].includes(row.status) && !live) {
+        for (const channel of Object.values(channels)) {
+            if (!['queued', 'running', 'idle'].includes(channel.status))
+                continue;
+            channel.status = retrying || queued ? 'queued' : 'failed';
+            if (channel.status === 'failed')
+                channel.error_code = 'source_interrupted';
+        }
+        const status = retrying || queued ? 'queued' : discoveryOutcome(channels);
+        if (status !== row.status || JSON.stringify(channels) !== row.channels_json) {
+            db.prepare(`UPDATE complaint_discovery SET status=?,channels_json=?,updated_at=?,deadline_at=NULL
+        WHERE complaint_id=? AND job_id=?`).run(status, JSON.stringify(channels), now, complaintId, row.job_id);
+            row.status = status;
+            row.updated_at = now;
+            row.deadline_at = null;
+        }
+    }
     return {
         status: row.status,
         from: row.from_date,
         to: row.to_date,
-        channels: JSON.parse(row.channels_json),
+        channels,
+        updated_at: row.updated_at,
+        deadline_at: row.deadline_at ?? null,
+        can_retry: !live && !retrying && !queued,
     };
+}
+export function discoveryOutcome(channels) {
+    const statuses = Object.values(channels).map((channel) => channel.status);
+    return statuses.every((status) => status === 'succeeded')
+        ? 'succeeded'
+        : statuses.every((status) => status === 'failed')
+            ? 'failed'
+            : 'partial';
 }
 function tableExists(db, name) {
     return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));

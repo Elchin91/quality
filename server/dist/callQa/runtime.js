@@ -3,7 +3,7 @@ import { createCallQaAutomation } from './automation.js';
 import { refineCallQaTask } from './refinement.js';
 import path from 'node:path';
 import { createSecretKey } from 'node:crypto';
-import { loadChatSourceConfig } from '../chatQa/sourceConfig.js';
+import { loadChatSourceConfig, loadHttpCatalogOptions } from '../chatQa/sourceConfig.js';
 import { listCallCatalog } from './catalog.js';
 import { createMongoCallSourceAdapter } from './mongoSource.js';
 import { createMysqlCallSourceAdapter } from './mysqlSource.js';
@@ -151,6 +151,7 @@ export function createCallQaRuntime(options) {
     const recordingClient = state.recordingConfig
         ? new CallsRecordingClient(state.recordingConfig)
         : null;
+    let complaintSource = null;
     let recordingStore = null;
     if (state.recordingConfig) {
         try {
@@ -439,16 +440,19 @@ export function createCallQaRuntime(options) {
         status,
         automation,
         complaints: {
-            discover: async (window, phone, signal) => {
+            discover: async (window, phone, signal, onProgress) => {
                 if (!source || !state.normalizationProtection)
                     throw new Error('source_unavailable');
+                if (state.recordingConfig && !complaintSource)
+                    complaintSource = createHttpCallSourceAdapter(state.recordingConfig, loadHttpCatalogOptions(options.env));
                 return discoverCallContacts({
                     db: options.db,
-                    source,
+                    source: complaintSource ?? source,
                     normalizationProtection: state.normalizationProtection,
                     window,
                     phone,
                     signal,
+                    onProgress,
                 });
             },
             prepare: async (sourceId, signal) => {
