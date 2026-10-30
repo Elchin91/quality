@@ -143,7 +143,8 @@ export async function createComplaintTask(input) {
     if (existing)
         return existing;
     const auth = authorizeComplaintTask(input.db, context);
-    const reason = `Complaint ${auth.complaint.jira_key}`;
+    // Jira keys can resemble phone numbers to the audit PII guard; links retain provenance.
+    const reason = 'Complaint review';
     if (input.channel === 'call')
         createComplaintCallTask({
             db: input.db,
@@ -207,7 +208,7 @@ export function reassignComplaintWork(input) {
             },
         };
         withComplaintTaskAuthorization(input.db, context, () => {
-            const reason = `Complaint ${current.jira_key} reassigned`;
+            const reason = 'Complaint reassignment';
             if (evidence.channel === 'chat')
                 reassignTask({
                     db: input.db,

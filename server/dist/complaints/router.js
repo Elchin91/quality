@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { CallQaServiceError } from '../callQa/errors.js';
+import { ChatQaServiceError } from '../chatQa/serviceSupport.js';
 import { complaintReviewers } from './assignment.js';
 import { complaintAgents, complaintDetail, complaintDto, requireComplaint } from './repository.js';
 import { completeComplaint, reassignComplaint, saveComplaint, } from './service.js';
@@ -34,6 +36,8 @@ export function createComplaintsRouter(options) {
         catch (error) {
             if (error instanceof ComplaintError)
                 res.status(error.status).json({ error: error.code, code: error.code });
+            else if (error instanceof CallQaServiceError || error instanceof ChatQaServiceError)
+                res.status(error.httpStatus).json({ error: error.code, code: error.code });
             else
                 next(error);
         }
