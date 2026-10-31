@@ -94,7 +94,7 @@ export async function openTeamRecording(input) {
         throw error;
     }
 }
-export function createTeamMediaRouter(db, uploadsRoot) {
+export function createTeamMediaRouter(db, uploadsRoot, openReadyFile = openReadyRecordingFile) {
     const router = Router();
     const query = z.object({ team_lead_user_id: z.string().min(1).max(200).optional() }).strict();
     router.route('/team/evaluations/:id/recording').get(handle).head(handle);
@@ -115,6 +115,7 @@ export function createTeamMediaRouter(db, uploadsRoot) {
                 rangeHeader: req.headers.range,
                 method: req.method === 'HEAD' ? 'HEAD' : 'GET',
                 signal,
+                ...(req.method !== 'HEAD' ? { openReadyFile } : {}),
             }));
         }
         catch {

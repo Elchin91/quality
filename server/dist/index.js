@@ -239,7 +239,7 @@ app.use('/api', createReviewerDashboardRouter({ db }));
 app.use('/api', createContactContextRouter({ db }));
 app.use('/api', createCallQaPolicyRouter({ db }));
 app.use('/api', createQaUnusableRouter({ db }));
-app.use('/api', createComplaintMediaRouter(db, uploadsDir));
+app.use('/api', createComplaintMediaRouter(db, uploadsDir, callQaRuntime.openReadyRecording));
 app.use('/api', createComplaintsRouter(complaintsRuntime.routerOptions));
 app.use('/api', createChatContextRouter({
     db,
@@ -278,7 +278,7 @@ app.use('/api', createCallQaReviewerRouter({
 // Admin user management.
 app.use('/api', adminUsersRouter);
 app.use('/api', createTeamRouter(db));
-app.use('/api', createTeamMediaRouter(db, uploadsDir));
+app.use('/api', createTeamMediaRouter(db, uploadsDir, callQaRuntime.openReadyRecording));
 app.use('/api', createNavigationRouter(db));
 app.use('/api', createStaffRouter(db));
 // Admin-only surfaces. The scorecard router internally scopes mutations/comments

@@ -10,7 +10,7 @@ import { createMysqlCallSourceAdapter } from './mysqlSource.js';
 import { createHttpCallSourceAdapter } from './httpSource.js';
 import { appendCallQaOperationalEvent } from './operationalEvents.js';
 import { createFfprobeRecordingProbe } from './recordingProbe.js';
-import { openAdminCallRecording, openReviewerCallRecording } from './recordingAccess.js';
+import { openAdminCallRecording, openReviewerCallRecording, openReadyRecordingFile, } from './recordingAccess.js';
 import { CallsRecordingClient } from './recordingClient.js';
 import { loadRecordingConfig } from './recordingConfig.js';
 import { CallsChatHttpTransport } from '../chatQa/httpTransport.js';
@@ -415,6 +415,7 @@ export function createCallQaRuntime(options) {
         reviewer,
         status,
         automation,
+        openReadyRecording: cache?.open ?? openReadyRecordingFile,
         complaints: {
             discover: complaintCalls.discover,
             prepare: async (sourceId, signal) => {

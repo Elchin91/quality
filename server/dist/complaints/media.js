@@ -8,7 +8,7 @@ import { requireComplaintEvidence } from './evidenceView.js';
 import { recordComplaintEvent } from './repository.js';
 import { ComplaintError } from './types.js';
 /** Source access is limited to evidence on the actor's complaint, with the real actor audited. */
-export function createComplaintMediaRouter(db, uploadsRoot) {
+export function createComplaintMediaRouter(db, uploadsRoot, openReadyFile = openReadyRecordingFile) {
     const router = Router();
     router.get('/complaints/:id/evidence/:evidenceId/recording', async (req, res) => {
         let opened;
@@ -44,7 +44,8 @@ export function createComplaintMediaRouter(db, uploadsRoot) {
                 res.set(headers).set('Content-Range', `bytes */${range.size}`).status(416).end();
                 return;
             }
-            opened = await openReadyRecordingFile({
+            // HEAD is metadata-only; GET may restore evicted bytes through the shared HTTP cache.
+            opened = await (req.method === 'HEAD' ? openReadyRecordingFile : openReadyFile)({
                 uploadsRoot,
                 uploadId: row.id,
                 storagePath: row.path,
