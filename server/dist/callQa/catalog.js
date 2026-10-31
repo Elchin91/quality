@@ -46,6 +46,7 @@ function validate(query) {
         !Number.isInteger(query.pageSize) ||
         query.pageSize < 1 ||
         query.pageSize > 100 ||
+        (query.sourceRecordId !== undefined && !SAFE_ID.test(query.sourceRecordId)) ||
         (query.taskId !== undefined && !SAFE_ID.test(query.taskId)) ||
         (query.bakuDate !== undefined && !validDate(query.bakuDate)) ||
         (query.agentId !== undefined && !safeFilter(query.agentId)) ||
@@ -62,6 +63,7 @@ function whereClause(query) {
     const clauses = [];
     const params = [];
     const equals = [
+        [query.sourceRecordId, 'records.id'],
         [query.taskId, 'tasks.id'],
         [query.bakuDate, 'records.baku_date'],
         [query.agentId, 'records.agent_id'],

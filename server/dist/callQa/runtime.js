@@ -93,38 +93,10 @@ function requireAdmin(db, actorUserId) {
 }
 function adminSourceDetail(db, actorUserId, sourceRecordId) {
     requireAdmin(db, actorUserId);
-    const row = db
-        .prepare(`SELECT records.id,records.source_ref,records.external_agent_name,
-              records.call_started_at_utc,records.call_ended_at_utc,records.baku_date,
-              records.duration_seconds,records.caller_last_four,records.direction,
-              records.queue_label,records.recording_status,records.first_seen_at,
-              records.last_seen_at,tasks.id AS task_id,tasks.status AS task_status
-         FROM call_source_records records
-         LEFT JOIN call_qa_tasks tasks ON tasks.id=(
-           SELECT latest.id FROM call_qa_tasks latest WHERE latest.source_record_id=records.id
-           ORDER BY CASE WHEN latest.status<>'cancelled' THEN 0 ELSE 1 END,
-             latest.rowid DESC LIMIT 1)
-        WHERE records.id=?`)
-        .get(sourceRecordId);
+    const row = listCallCatalog(db, { page: 1, pageSize: 1, sourceRecordId }).items[0];
     if (!row)
         throw new CallQaServiceError('not_found', 404);
-    return {
-        id: row.id,
-        sourceRef: row.source_ref,
-        externalAgentName: row.external_agent_name,
-        startedAtUtc: row.call_started_at_utc,
-        endedAtUtc: row.call_ended_at_utc,
-        bakuDate: row.baku_date,
-        durationSeconds: row.duration_seconds,
-        callerLastFour: row.caller_last_four,
-        direction: row.direction,
-        queueLabel: row.queue_label,
-        recordingStatus: row.recording_status,
-        assignmentStatus: row.task_status ?? 'unassigned',
-        taskId: row.task_id,
-        firstSeenAt: row.first_seen_at,
-        lastSeenAt: row.last_seen_at,
-    };
+    return row;
 }
 function locator(value) {
     if (value.startsWith('call-url:'))

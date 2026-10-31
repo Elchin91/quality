@@ -4,10 +4,21 @@ import { nanoid } from 'nanoid';
 import { db } from '../db.js';
 import { ALLOWED_DOMAIN, hashPassword, isAllowedEmail, normalizeEmail, requireAdmin, requireAuth, } from '../auth.js';
 import { asyncHandler } from '../asyncHandler.js';
+import { setTeamMembership } from '../team/service.js';
+import { writeStaffAudit } from '../users/staffAudit.js';
 import { enqueueReviewerRefill } from '../jobs/qaRefill.js';
 import { configuredDefaultCapacity, reviewerReadiness, reviewerReadinessMap, updateReviewerProfile, REVIEWER_GROUPS, } from '../reviewerAssignment/repository.js';
 export const adminUsersRouter = Router();
 const AGENT_ALREADY_LINKED = 'agent profile already linked to another user';
+function assertStaffActor(actorId, expectedSession) {
+    const actor = db.prepare('SELECT * FROM users WHERE id = ?').get(actorId);
+    if (!actor ||
+        actor.role !== 'admin' ||
+        !actor.active ||
+        actor.must_change_password ||
+        (expectedSession !== undefined && (actor.session_version ?? 0) !== expectedSession))
+        throw new Error('staff_actor_forbidden');
+}
 function isAgentLinkConstraint(error) {
     const message = error instanceof Error ? error.message : String(error);
     return message.includes('users.agent_id') || message.includes('idx_users_agent_unique');
@@ -56,6 +67,7 @@ const createSchema = z.object({
     }),
     role: z.enum(['admin', 'agent', 'team_lead', 'reviewer']).default('agent'),
     agent_id: z.string().optional().nullable(),
+    team_lead_user_id: z.string().min(1).max(128).nullable().optional(),
 });
 adminUsersRouter.post('/admin/users', requireAuth, requireAdmin, asyncHandler(async (req, res) => {
     const parsed = createSchema.safeParse(req.body);
@@ -63,17 +75,27 @@ adminUsersRouter.post('/admin/users', requireAuth, requireAdmin, asyncHandler(as
         return res.status(400).json({ error: parsed.error.errors[0]?.message || 'invalid input' });
     }
     const { email, name, password, role } = parsed.data;
+    const leadId = parsed.data.team_lead_user_id;
+    if (role !== 'agent' && leadId != null)
+        return res.status(400).json({ error: 'only agent users can have a team lead' });
     if (role !== 'agent' && parsed.data.agent_id) {
         return res.status(400).json({ error: 'only agent users can link an agent profile' });
     }
     const id = nanoid(12);
+    const actor = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
     const password_hash = await hashPassword(password);
     let agent_id = role === 'agent' ? (parsed.data.agent_id ?? null) : null;
     try {
         const createAccount = db.transaction(() => {
+            assertStaffActor(req.user.id, actor?.session_version ?? 0);
             const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
             if (existing)
                 return { status: 409, error: 'email already registered' };
+            if (leadId != null &&
+                !db
+                    .prepare("SELECT 1 FROM users WHERE id=? AND role='team_lead' AND active=1")
+                    .get(leadId))
+                return { status: 400, error: 'invalid team lead' };
             if (agent_id) {
                 const linkedAgent = db.prepare('SELECT id FROM agents WHERE id = ?').get(agent_id);
                 if (!linkedAgent)
@@ -81,11 +103,18 @@ adminUsersRouter.post('/admin/users', requireAuth, requireAdmin, asyncHandler(as
             }
             if (role === 'agent' && !agent_id) {
                 // Auto-link to an existing managed profile, or create it atomically with the user.
-                const match = db.prepare('SELECT id FROM agents WHERE email = ?').get(email);
+                const matches = db
+                    .prepare('SELECT id FROM agents WHERE lower(trim(email)) = ?')
+                    .all(email);
+                if (matches.length > 1)
+                    return { status: 409, error: 'ambiguous agent profiles' };
+                const match = matches[0];
                 if (match) {
                     agent_id = match.id;
                 }
                 else {
+                    if (db.prepare('SELECT id FROM agents WHERE lower(trim(name))=lower(?)').get(name))
+                        return { status: 409, error: 'existing profile must be selected' };
                     agent_id = nanoid(12);
                     db.prepare('INSERT INTO agents (id, name, email, avatar_url, created_at) VALUES (?, ?, ?, NULL, ?)').run(agent_id, name, email, Date.now());
                 }
@@ -98,6 +127,15 @@ adminUsersRouter.post('/admin/users', requireAuth, requireAdmin, asyncHandler(as
             db.prepare(`INSERT INTO users
              (id, email, password_hash, name, role, agent_id, active, must_change_password, created_at)
            VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)`).run(id, email, password_hash, name, role, agent_id, Date.now());
+            if (agent_id &&
+                leadId !== undefined &&
+                !setTeamMembership(db, req.user.id, agent_id, leadId))
+                throw new Error('staff_membership_conflict');
+            writeStaffAudit(db, req.user.id, id, 'created', {
+                role,
+                agent_id,
+                team_lead_user_id: leadId,
+            });
             return { status: 200 };
         });
         const result = createAccount();
@@ -105,6 +143,10 @@ adminUsersRouter.post('/admin/users', requireAuth, requireAdmin, asyncHandler(as
             return res.status(result.status).json({ error: result.error });
     }
     catch (error) {
+        if (error instanceof Error && error.message === 'staff_actor_forbidden')
+            return res.status(403).json({ error: 'administrator access changed; sign in again' });
+        if (error instanceof Error && error.message === 'staff_membership_conflict')
+            return res.status(409).json({ error: 'staff membership changed; retry' });
         if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
             if (isAgentLinkConstraint(error)) {
                 return res.status(409).json({ error: AGENT_ALREADY_LINKED });
@@ -130,6 +172,7 @@ const patchSchema = z
     })
         .optional(),
     reviewer_available: z.boolean().optional(),
+    team_lead_user_id: z.string().min(1).max(128).nullable().optional(),
     reviewer_groups: z.array(z.enum(REVIEWER_GROUPS)).min(1).max(REVIEWER_GROUPS.length).optional(),
 })
     .strict()
@@ -139,9 +182,24 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
     if (!parsed.success) {
         return res.status(400).json({ error: parsed.error.errors[0]?.message || 'invalid input' });
     }
+    const actor = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const passwordHash = parsed.data.new_password === undefined
+        ? undefined
+        : await hashPassword(parsed.data.new_password);
+    // Re-read identity after asynchronous hashing; all remaining checks and writes are synchronous.
     const target = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
     if (!target)
         return res.status(404).json({ error: 'not found' });
+    const requestedLead = parsed.data.team_lead_user_id;
+    const finalAgentId = parsed.data.agent_id === undefined ? target.agent_id : parsed.data.agent_id;
+    if (requestedLead !== undefined &&
+        ((parsed.data.role ?? target.role) !== 'agent' || !finalAgentId))
+        return res.status(400).json({ error: 'only agent users can have a team lead' });
+    if (requestedLead != null &&
+        !db
+            .prepare("SELECT 1 FROM users WHERE id=? AND role='team_lead' AND active=1")
+            .get(requestedLead))
+        return res.status(400).json({ error: 'invalid team lead' });
     const resultingRole = parsed.data.role ?? target.role;
     if (parsed.data.agent_id) {
         const requestedAgent = db
@@ -175,15 +233,6 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
     if (updatesReviewerProfile && resultingRole !== 'reviewer') {
         return res.status(400).json({ error: 'reviewer assignment profile requires reviewer role' });
     }
-    // Safety: prevent demoting/deactivating the last active admin.
-    if (((parsed.data.role !== undefined && parsed.data.role !== 'admin') ||
-        parsed.data.active === false) &&
-        target.role === 'admin') {
-        const activeAdmins = db.prepare(`SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1`).get().c;
-        if (activeAdmins <= 1) {
-            return res.status(400).json({ error: 'cannot remove the last active admin' });
-        }
-    }
     const updates = [];
     const args = [];
     if (parsed.data.role !== undefined) {
@@ -210,19 +259,41 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
     }
     if (parsed.data.new_password !== undefined) {
         updates.push('password_hash = ?');
-        args.push(await hashPassword(parsed.data.new_password));
+        args.push(passwordHash);
         updates.push('must_change_password = 1');
         updates.push('session_version = session_version + 1');
     }
-    if (!updates.length && !updatesReviewerProfile)
+    if (!updates.length && !updatesReviewerProfile && requestedLead === undefined)
         return res.json({ ok: true });
     if (updates.length)
         args.push(req.params.id);
     try {
         db.transaction(() => {
+            assertStaffActor(req.user.id, actor?.session_version ?? 0);
+            if (target.role === 'admin' &&
+                target.active &&
+                (resultingRole !== 'admin' || parsed.data.active === false)) {
+                const { c } = db
+                    .prepare("SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1")
+                    .get();
+                if (c <= 1)
+                    throw new Error('cannot remove the last active admin');
+            }
             if (updates.length) {
                 db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...args);
             }
+            if (resultingAgentId && parsed.data.name !== undefined && parsed.data.name !== target.name)
+                db.prepare('UPDATE agents SET name = ? WHERE id = ?').run(parsed.data.name, resultingAgentId);
+            if (requestedLead !== undefined &&
+                !setTeamMembership(db, req.user.id, finalAgentId, requestedLead))
+                throw new Error('staff_membership_conflict');
+            writeStaffAudit(db, req.user.id, target.id, 'updated', {
+                role: parsed.data.role,
+                active: parsed.data.active,
+                agent_id: parsed.data.agent_id,
+                team_lead_user_id: requestedLead,
+                password_reset: parsed.data.new_password !== undefined,
+            });
             if (updatesReviewerProfile) {
                 const current = reviewerReadiness(db, req.params.id, configuredDefaultCapacity(db));
                 updateReviewerProfile(db, {
@@ -241,6 +312,12 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
         })();
     }
     catch (error) {
+        if (error instanceof Error && error.message === 'staff_actor_forbidden')
+            return res.status(403).json({ error: 'administrator access changed; sign in again' });
+        if (error instanceof Error && error.message === 'cannot remove the last active admin')
+            return res.status(400).json({ error: error.message });
+        if (error instanceof Error && error.message === 'staff_membership_conflict')
+            return res.status(409).json({ error: 'staff membership changed; retry' });
         if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
             if (isAgentLinkConstraint(error)) {
                 return res.status(409).json({ error: AGENT_ALREADY_LINKED });

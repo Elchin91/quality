@@ -12,7 +12,8 @@ import { scorecardReviewRouter } from './scorecard-review.js';
 import { toScorecardLanguage } from '../lang.js';
 import { asyncHandler } from '../asyncHandler.js';
 import { decodeAdminEvaluation } from '../evaluationSerialization.js';
-import { buildEffectiveEvaluationWhere, effectiveEvaluationProjection, } from '../effectiveEvaluations.js';
+import { buildEffectiveEvaluationWhere, effectiveEvaluationProjection, effectiveCriteriaSql, businessDateSql, } from '../effectiveEvaluations.js';
+import { scorecardFilterShape, scorecardFilterSql } from '../analytics/scorecardFilter.js';
 export const scorecardRequestSchema = z
     .object({
     text: z.string().min(1).optional(),
@@ -37,6 +38,7 @@ const calendarDate = z.string().refine((value) => {
 }, 'invalid calendar date');
 const evaluationListQuery = z
     .object({
+    scorecard: scorecardFilterShape,
     from: calendarDate.optional(),
     to: calendarDate.optional(),
     agent_id: repeatedString,
@@ -191,7 +193,7 @@ scorecardRouter.get('/evaluations', (req, res) => {
     const parsedQuery = evaluationListQuery.safeParse(req.query);
     if (!parsedQuery.success)
         return res.status(400).json({ error: 'invalid query' });
-    const { from, to, agent_id, team_leader, reviewer, classifier, score_min, score_max, type, limit: lim, offset: off, } = parsedQuery.data;
+    const { scorecard, from, to, agent_id, team_leader, reviewer, classifier, score_min, score_max, type, limit: lim, offset: off, } = parsedQuery.data;
     const filters = buildEffectiveEvaluationWhere({
         from,
         to,
@@ -208,19 +210,22 @@ scorecardRouter.get('/evaluations', (req, res) => {
         conds.push('e.type = ?');
         args.push(type);
     }
+    const scorecardCondition = scorecardFilterSql(scorecard, 'e', effectiveCriteriaSql());
+    if (scorecardCondition)
+        conds.push(scorecardCondition);
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
     const projection = effectiveEvaluationProjection();
     const total = db
         .prepare(`SELECT COUNT(*) AS n FROM evaluations e ${projection.joins} ${where}`)
         .get(...args).n;
     const rows = db
-        .prepare(`SELECT ${projection.select}, a.name as agent_name, evaluator.name as evaluator_name
+        .prepare(`SELECT ${projection.select}, ${businessDateSql()} AS business_date, a.name as agent_name, evaluator.name as evaluator_name
          FROM evaluations e
          ${projection.joins}
          LEFT JOIN agents a ON a.id = e.agent_id
          LEFT JOIN users evaluator ON evaluator.id = e.evaluator_id
          ${where}
-         ORDER BY e.created_at DESC
+         ORDER BY e.created_at DESC, e.id DESC
          LIMIT ${lim} OFFSET ${off}`)
         .all(...args);
     res.json({ total, limit: lim, offset: off, items: rows.map(decodeAdminEvaluation) });

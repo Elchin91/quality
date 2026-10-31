@@ -1,10 +1,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { activeTeamLeads, selectedTeamLead } from './access.js';
 import { parseAnalyticsFilters } from '../analytics/filters.js';
 import { teamDashboard, teamEvaluation, teamEvaluations, teamMemberships, setTeamMembership, } from './service.js';
 const id = z.string().min(1).max(200);
 const querySchema = z
     .object({
+    team_lead_user_id: id.optional(),
     from: z.string().optional(),
     to: z.string().optional(),
     agent_id: id.optional(),
@@ -31,6 +33,7 @@ export function createTeamRouter(db) {
         next();
     };
     const lead = requireRole('team_lead');
+    router.get('/team/leads', lead, (_req, res) => res.json({ items: activeTeamLeads(db) }));
     router.get('/team/dashboard', lead, (req, res) => {
         const parsed = querySchema.safeParse(req.query);
         if (!parsed.success)
@@ -41,7 +44,10 @@ export function createTeamRouter(db) {
         catch {
             return res.status(400).json({ error: 'invalid date range' });
         }
-        res.json(teamDashboard(db, req.user.id, parsed.data));
+        const scope = selectedTeamLead(db, req.user.id, parsed.data.team_lead_user_id);
+        if (!scope)
+            return res.status(404).json({ error: 'not found' });
+        res.json(teamDashboard(db, scope, parsed.data));
     });
     router.get('/team/evaluations', lead, (req, res) => {
         const parsed = querySchema.safeParse(req.query);
@@ -53,12 +59,21 @@ export function createTeamRouter(db) {
         catch {
             return res.status(400).json({ error: 'invalid date range' });
         }
-        res.json(teamEvaluations(db, req.user.id, parsed.data, parsed.data.limit, parsed.data.offset));
+        const scope = selectedTeamLead(db, req.user.id, parsed.data.team_lead_user_id);
+        if (!scope)
+            return res.status(404).json({ error: 'not found' });
+        res.json(teamEvaluations(db, scope, parsed.data, parsed.data.limit, parsed.data.offset));
     });
     router.get('/team/evaluations/:id', lead, (req, res) => {
         if (!id.safeParse(req.params.id).success)
             return res.status(400).json({ error: 'invalid id' });
-        const result = teamEvaluation(db, req.user.id, req.params.id);
+        const query = z.object({ team_lead_user_id: id.optional() }).strict().safeParse(req.query);
+        if (!query.success)
+            return res.status(400).json({ error: 'invalid query' });
+        const scope = selectedTeamLead(db, req.user.id, query.data.team_lead_user_id);
+        if (!scope)
+            return res.status(404).json({ error: 'not found' });
+        const result = teamEvaluation(db, scope, req.params.id);
         if (!result)
             return res.status(404).json({ error: 'not found' });
         res.json(result);

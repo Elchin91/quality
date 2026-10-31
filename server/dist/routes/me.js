@@ -4,7 +4,7 @@ import { nanoid } from 'nanoid';
 import { db } from '../db.js';
 import { requireAgent } from '../auth.js';
 import { decodeAgentComment, decodeAgentEvaluation, } from '../evaluationSerialization.js';
-import { effectiveEvaluationProjection } from '../effectiveEvaluations.js';
+import { businessDateSql, effectiveEvaluationProjection } from '../effectiveEvaluations.js';
 import { effectiveCriteriaSql, effectiveScoreSql } from '../effectiveEvaluations.js';
 import { bakuDate } from '../analytics/filters.js';
 export const meRouter = Router();
@@ -116,11 +116,12 @@ meRouter.get('/me/summary', requireAgent, (req, res) => {
         .prepare(`SELECT COUNT(*) AS total_evaluations, COALESCE(AVG(${effectiveScore}), 0) AS avg_score
          FROM evaluations e ${projection.joins} WHERE e.agent_id = ?`)
         .get(req.agentId);
-    const monthAgo = Date.now() - 30 * 86_400_000;
+    const month = bakuDate(Date.now()).slice(0, 7);
     const monthly = db
         .prepare(`SELECT COUNT(*) AS this_month_count, COALESCE(AVG(${effectiveScore}), 0) AS this_month_avg
-         FROM evaluations e ${projection.joins} WHERE e.agent_id = ? AND e.created_at >= ?`)
-        .get(req.agentId, monthAgo);
+         FROM evaluations e ${projection.joins}
+         WHERE e.agent_id = ? AND substr(${businessDateSql()}, 1, 7) = ?`)
+        .get(req.agentId, month);
     const trendRows = db
         .prepare(`SELECT e.created_at, ${effectiveScore} AS score FROM evaluations e
          ${projection.joins}

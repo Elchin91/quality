@@ -1,4 +1,4 @@
-import { teamWhere } from '../team/service.js';
+import { readableTeamEvaluationSql } from '../team/access.js';
 /** Derive media task context only from a visible completed evaluation, never a browser task ID. */
 export function evaluationAttachmentTask(db, evaluationId, userId) {
     const user = db
@@ -6,7 +6,7 @@ export function evaluationAttachmentTask(db, evaluationId, userId) {
         .get(userId);
     if (!user || !['admin', 'team_lead', 'reviewer'].includes(user.role))
         return null;
-    const scope = user.role === 'team_lead' ? teamWhere(userId, {}) : null;
+    const scope = user.role === 'team_lead' ? { sql: readableTeamEvaluationSql, args: [] } : null;
     const condition = scope?.sql ??
         (user.role === 'reviewer'
             ? `(e.evaluator_id=? OR EXISTS (SELECT 1 FROM appeals a WHERE a.evaluation_id=e.id AND a.assigned_reviewer_id=?))`

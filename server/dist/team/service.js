@@ -1,6 +1,7 @@
 import { businessDateSql, effectiveEvaluationProjection } from '../effectiveEvaluations.js';
 import { decodeAgentEvaluation } from '../evaluationSerialization.js';
 import { historicalTeamAssignments } from './history.js';
+import { teamCallMaterial } from './materials.js';
 export function teamWhere(userId, filters) {
     const conditions = [
         `EXISTS (SELECT 1 FROM agent_team_memberships m
@@ -129,13 +130,13 @@ export function teamEvaluation(db, userId, id) {
     if (!row)
         return null;
     const decoded = decodeAgentEvaluation(row);
-    // The team portal exposes scores and coaching, not raw customer conversations/media.
     return {
         id: row.id,
         agent_id: row.agent_id,
         agent_name: row.agent_name,
         score: decoded.score,
         original_score: decoded.original_score,
+        call_material: row.type === 'call' ? teamCallMaterial(db, id) : null,
         criteria: decoded.criteria,
         criteria_notes: decoded.criteria_notes,
         summary: decoded.summary,

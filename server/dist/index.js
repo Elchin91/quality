@@ -32,6 +32,9 @@ import { createAsrLabRouter } from './routes/asr-lab.js';
 import { scorecardRouter } from './routes/scorecard.js';
 import { agentsRouter } from './routes/agents.js';
 import { createTeamRouter } from './team/routes.js';
+import { createTeamMediaRouter } from './team/media.js';
+import { createNavigationRouter } from './navigation.js';
+import { createStaffRouter } from './users/staff.js';
 import { analyticsRouter } from './routes/analytics.js';
 import { settingsRouter } from './routes/settings.js';
 import { authRouter } from './routes/auth.js';
@@ -275,6 +278,9 @@ app.use('/api', createCallQaReviewerRouter({
 // Admin user management.
 app.use('/api', adminUsersRouter);
 app.use('/api', createTeamRouter(db));
+app.use('/api', createTeamMediaRouter(db, uploadsDir));
+app.use('/api', createNavigationRouter(db));
+app.use('/api', createStaffRouter(db));
 // Admin-only surfaces. The scorecard router internally scopes mutations/comments
 // to admins; analytics/settings/agents/uploads/transcribe remain admin-only.
 app.use('/api', createCareSyncRouter(careSync));
