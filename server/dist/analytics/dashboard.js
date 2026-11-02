@@ -54,6 +54,24 @@ function loadRows(database, filters, previous = false) {
         .all(...where.args);
     return rows.map((row) => ({ ...row, scorecard: toScorecardKind(row.scorecard) }));
 }
+function unknownContactCount(database, filters) {
+    const where = buildEffectiveEvaluationWhere({
+        agentIds: filters.agentIds,
+        teamLeaders: filters.teamLeaders,
+        reviewers: filters.reviewers,
+        classifiers: filters.classifiers,
+    });
+    const hasRevisions = Boolean(database
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evaluation_revisions'")
+        .get());
+    const criteria = hasRevisions ? effectiveCriteriaSql() : 'e.criteria_json';
+    const sql = andWhere(andWhere(where.sql, scorecardFilterSql(filters.scorecard, 'e', criteria)), `${businessDateSql()} IS NULL`);
+    return Number(database
+        .prepare(`SELECT COUNT(*) FROM evaluations e
+    ${hasRevisions ? 'LEFT JOIN evaluation_revisions er ON er.evaluation_id=e.id' : ''} ${sql}`)
+        .pluck()
+        .get(...where.args));
+}
 function parseCriteria(row) {
     try {
         const value = JSON.parse(row.criteria_json);
@@ -144,6 +162,8 @@ function trend(rows, previous, bucket, shift) {
     const aggregate = (items, timestampShift = 0) => {
         const groups = new Map();
         for (const row of items) {
+            if (!row.business_date)
+                continue;
             const effectiveTimestamp = Date.parse(`${row.business_date}T00:00:00+04:00`) + timestampShift;
             const key = periodKey(effectiveTimestamp, bucket);
             groups.set(key, [...(groups.get(key) ?? []), row]);
@@ -178,6 +198,7 @@ function filterOptions(database) {
 }
 export function buildAnalyticsDashboard(database, filters) {
     const rows = loadRows(database, filters);
+    const unknownContactDateCount = unknownContactCount(database, filters);
     const canCompare = filters.fromMs !== undefined && filters.toExclusiveMs !== undefined;
     const previous = canCompare ? loadRows(database, filters, true) : [];
     const currentAverage = average(rows);
@@ -196,6 +217,8 @@ export function buildAnalyticsDashboard(database, filters) {
     const scoredAgents = new Set(rows.map((row) => row.agent_id).filter(Boolean)).size;
     const totalAgents = database.prepare('SELECT COUNT(*) AS count FROM agents').get();
     return {
+        unknown_contact_date_count: unknownContactDateCount,
+        period_basis: 'contact',
         filters: filterOptions(database),
         applied_filters: {
             from: filters.from ?? null,
@@ -209,6 +232,7 @@ export function buildAnalyticsDashboard(database, filters) {
         },
         kpis: {
             evaluation_count: rows.length,
+            unknown_contact_date_count: rows.filter((row) => row.business_date === null).length,
             average_score: currentAverage,
             average_score_delta: currentAverage !== null && previousAverage !== null
                 ? round(currentAverage - previousAverage)

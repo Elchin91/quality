@@ -1,6 +1,8 @@
 import { regularTaskPredicate } from '../qaPurpose.js';
 import { randomInt } from 'node:crypto';
 import { bakuMonth, bakuMonthBounds } from '../qaAutomation/types.js';
+import { taskContactDateSql } from '../contactPeriod.js';
+import { standaloneReviewerCounts } from './standaloneEvaluations.js';
 /** Which agents' work a reviewer receives automatically. */
 export const REVIEWER_GROUPS = ['customer_support', 'telesales'];
 const DEFAULT_GROUPS = ['customer_support'];
@@ -190,6 +192,30 @@ export function monthlyAssignments(db, reviewerUserIds, nowMs) {
     }
     return result;
 }
+/** Reserved regular work for the contact month; unknown dates never become current-month work. */
+export function monthlyAssignmentsForMonth(db, reviewerUserIds, month) {
+    bakuMonthBounds(month);
+    const result = new Map(reviewerUserIds.map((id) => [id, 0]));
+    if (!reviewerUserIds.length)
+        return result;
+    const placeholders = reviewerUserIds.map(() => '?').join(',');
+    for (const channel of ['chat', 'call']) {
+        const table = `${channel}_qa_tasks`;
+        if (!tableExists(db, table))
+            continue;
+        const rows = db
+            .prepare(`SELECT t.reviewer_user_id,COUNT(*) count FROM ${table} t
+      WHERE t.reviewer_user_id IN (${placeholders}) AND t.status<>'cancelled'
+        AND ${regularTaskPredicate(db, table, 't')}
+        AND substr(${taskContactDateSql(db, channel)},1,7)=? GROUP BY t.reviewer_user_id`)
+            .all(...reviewerUserIds, month);
+        for (const row of rows)
+            result.set(row.reviewer_user_id, (result.get(row.reviewer_user_id) ?? 0) + row.count);
+    }
+    for (const row of standaloneReviewerCounts(db, reviewerUserIds, month))
+        result.set(row.reviewer_user_id, (result.get(row.reviewer_user_id) ?? 0) + row.completed);
+    return result;
+}
 function readinessReason(row, available) {
     if (row.role !== 'reviewer')
         return 'role';
@@ -267,7 +293,7 @@ export function selectReviewerAndAdvance(db, input) {
         throw new Error('reviewer_unavailable');
     // Equal shares over the month first, so a reviewer who finishes quickly is not flooded;
     // the open queue only breaks ties.
-    const month = monthlyAssignments(db, ready.map(({ userId }) => userId), input.now);
+    const month = monthlyAssignmentsForMonth(db, ready.map(({ userId }) => userId), input.contactMonth ?? bakuMonth(input.now));
     const fewest = Math.min(...ready.map((row) => month.get(row.userId) ?? 0));
     const balanced = ready.filter((row) => (month.get(row.userId) ?? 0) === fewest);
     const minimum = Math.min(...balanced.map((row) => row.openWorkload));

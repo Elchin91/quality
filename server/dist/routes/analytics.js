@@ -3,7 +3,8 @@ import { db } from '../db.js';
 import { buildAnalyticsDashboard } from '../analytics/dashboard.js';
 import { parseAnalyticsFilters } from '../analytics/filters.js';
 import { andWhere, parseScorecardFilter, scorecardFilterSql, } from '../analytics/scorecardFilter.js';
-import { effectiveCriteriaSql, effectiveEvaluationProjection, effectiveScoreSql, } from '../effectiveEvaluations.js';
+import { effectiveCriteriaSql, effectiveEvaluationProjection, effectiveScoreSql, businessDateSql, } from '../effectiveEvaluations.js';
+import { bakuDate } from '../analytics/filters.js';
 /** Parses `?scorecard=v2|m10|all` (default all); answers 400 and returns null when invalid. */
 function scorecardFromQuery(value, res) {
     try {
@@ -38,21 +39,23 @@ export function createAnalyticsRouter(database) {
         const andKind = kindFilter ? `AND ${kindFilter}` : '';
         const totals = database
             .prepare(`SELECT COUNT(*) AS total_evaluations,
-                COALESCE(AVG(${effectiveScore}), 0) AS avg_score
+                COALESCE(AVG(${effectiveScore}), 0) AS avg_score,
+                COALESCE(SUM(${businessDateSql()} IS NULL),0) AS unknown_contact_date_count
            FROM evaluations e ${projection.joins} ${where}`)
             .get();
         const activeAgents = database
             .prepare(`SELECT COUNT(DISTINCT e.agent_id) AS c FROM evaluations e ${projection.joins}
            WHERE e.agent_id IS NOT NULL ${andKind}`)
             .get();
-        const monthAgo = Date.now() - 30 * 86_400_000;
+        const today = bakuDate(Date.now());
+        const month = today.slice(0, 7);
         const monthly = database
             .prepare(`SELECT COUNT(*) AS this_month_count, COALESCE(AVG(score), 0) AS this_month_avg
            FROM (
-             SELECT e.created_at, ${effectiveScore} AS score
+             SELECT ${businessDateSql()} AS contact_date, ${effectiveScore} AS score
              FROM evaluations e ${projection.joins} ${where}
-           ) WHERE created_at >= ?`)
-            .get(monthAgo);
+           ) WHERE substr(contact_date,1,7)=?`)
+            .get(month);
         const top = database
             .prepare(`SELECT a.id, a.name,
                 COUNT(e.id) AS eval_count,
@@ -67,14 +70,14 @@ export function createAnalyticsRouter(database) {
            LIMIT 5`)
             .all();
         const trendRows = database
-            .prepare(`SELECT e.created_at, ${effectiveScore} AS score FROM evaluations e
+            .prepare(`SELECT ${businessDateSql()} AS contact_date, ${effectiveScore} AS score FROM evaluations e
            ${projection.joins}
-           WHERE e.created_at >= ? ${andKind}
-           ORDER BY e.created_at ASC`)
-            .all(Date.now() - 7 * 86_400_000);
+           WHERE ${businessDateSql()} >= ? AND ${businessDateSql()} <= ? ${andKind}
+           ORDER BY contact_date ASC`)
+            .all(bakuDate(Date.now() - 6 * 86_400_000), today);
         const byDay = {};
         for (const r of trendRows) {
-            const day = new Date(r.created_at).toISOString().slice(0, 10);
+            const day = r.contact_date;
             byDay[day] = byDay[day] || { sum: 0, n: 0 };
             byDay[day].sum += r.score;
             byDay[day].n += 1;
@@ -94,6 +97,8 @@ export function createAnalyticsRouter(database) {
             active_agents: activeAgents.c,
             this_month_count: monthly.this_month_count,
             this_month_avg: +Number(monthly.this_month_avg).toFixed(2),
+            unknown_contact_date_count: totals.unknown_contact_date_count ?? 0,
+            period_basis: 'contact',
             top_agents: top,
             trend,
             by_type: byType,

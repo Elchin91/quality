@@ -8,8 +8,9 @@ import { recordAiReview } from '../aiEvaluation/persistence.js';
 import { calculateQaV2Score } from '../prompts/qaV2Scorecard.js';
 import { isCurrentChatDraft } from './aiDraft.js';
 import { operatorChannelCapacity, operatorMonthlyCapacity, quotaFor, } from '../qaAutomation/quota.js';
+import { deliveryItemExists, recordDeliveryItem } from '../qaAutomation/dailyRepository.js';
 import { enqueueQaRefill } from '../jobs/qaRefill.js';
-import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { bakuReviewDay, previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { CHAT_EVIDENCE_HASH_VERSION, normalizeConversation, } from './normalize.js';
 import { retainedTranscriptInterval } from './schema.js';
 import { persistedConversationEvidence } from './sourceEvidenceStore.js';
@@ -74,6 +75,8 @@ async function createTask(input) {
         return runImmediate(input.db, () => {
             if (input.signal?.aborted)
                 fail('task_state_conflict');
+            if (deliveryItemExists(input.db, input.deliveryDate, 'chat', input.interactionId))
+                fail('duplicate_task');
             if (input.complaint)
                 authorizeComplaintTask(input.db, input.complaint);
             else if (input.assignmentOrigin === 'manual')
@@ -108,6 +111,9 @@ async function createTask(input) {
                         ? selectReviewerAndAdvance(input.db, {
                             defaultCapacity: settings.reviewer_open_cap,
                             now: now.getTime(),
+                            contactMonth: new Date(interaction.completed_at_utc + 4 * 3_600_000)
+                                .toISOString()
+                                .slice(0, 7),
                             randomIndex: input.randomIndex,
                         })
                         : reviewerReadiness(input.db, input.reviewerUserId ?? '', settings.reviewer_open_cap);
@@ -129,14 +135,14 @@ async function createTask(input) {
                     .remaining === 0)
                 fail('duplicate_task');
             if (input.assignmentOrigin === 'automatic' && input.enforceRosterQuota) {
-                const reviewDay = previousBakuDay(now);
+                const reviewDay = input.reviewDate ? bakuReviewDay(input.reviewDate) : previousBakuDay(now);
                 if (interaction.completed_at_utc < reviewDay.start ||
                     interaction.completed_at_utc >= reviewDay.end)
                     fail('source_unavailable');
             }
             if (input.assignmentOrigin === 'automatic' &&
                 input.enforceRosterQuota &&
-                !quotaFor(input.db, agentId, now, 'chat').allowed)
+                !quotaFor(input.db, agentId, now, 'chat', input.reviewDate).allowed)
                 fail('duplicate_task');
             const taskId = idFrom(input.createId);
             const nowMs = now.getTime();
@@ -162,6 +168,7 @@ async function createTask(input) {
                     .prepare('UPDATE source_interactions SET message_counts_verified_at=? WHERE id=?')
                     .run(nowMs, interaction.id);
             input.complaint?.onCreated(taskId);
+            recordDeliveryItem(input.db, input.deliveryDate, 'chat', interaction.id, taskId);
             notify(input.db, input.createId, selectedReviewer.userId, 'chat_qa_assigned', taskId, nowMs);
             return task(input.db, taskId);
         });

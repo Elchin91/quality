@@ -1,26 +1,6 @@
-function metadataDateSql(alias, key) {
-    const metadata = `CASE WHEN json_valid(${alias}.source_metadata_json) THEN ${alias}.source_metadata_json ELSE '{}' END`;
-    const value = `json_extract(${metadata}, '$.${key}')`;
-    const textDate = `substr(${value}, 1, 10)`;
-    return `CASE
-    WHEN typeof(${value}) IN ('integer', 'real')
-      THEN date((${value}) / 1000, 'unixepoch', '+4 hours')
-    WHEN '${key}' <> 'contact_started_at'
-      AND typeof(${value}) = 'text'
-      AND length(${value}) >= 10
-      AND ${textDate} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
-      AND date(${textDate}, '+0 days') = ${textDate}
-      THEN ${textDate}
-    ELSE NULL
-  END`;
-}
+import { contactDateSql } from './contactPeriod.js';
 export function businessDateSql(alias = 'e') {
-    return `COALESCE(
-    ${metadataDateSql(alias, 'contact_started_at')},
-    ${metadataDateSql(alias, 'contact_date')},
-    ${metadataDateSql(alias, 'evaluation_date')},
-    date(${alias}.created_at / 1000, 'unixepoch', '+4 hours')
-  )`;
+    return contactDateSql(alias);
 }
 export function effectiveScoreSql(alias = 'e', revisionAlias = 'er') {
     return `COALESCE(${revisionAlias}.new_score, ${alias}.score)`;

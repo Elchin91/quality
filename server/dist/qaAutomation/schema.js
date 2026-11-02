@@ -1,5 +1,7 @@
+import { createDailyDeliverySchema } from './dailyRepository.js';
 /** Additive, repeatable migration. The snapshot is replaceable; confirmations are retained. */
 export function createQaAutomationSchema(db) {
+    createDailyDeliverySchema(db);
     db.exec(`
     CREATE TABLE IF NOT EXISTS qa_roster_snapshots (
       month TEXT PRIMARY KEY CHECK(month GLOB '????-??'),

@@ -3,7 +3,7 @@ import { callDirectionSql } from '../callsDirectory/groups.js';
 import { unusableSql } from '../qaUnusable/unusable.js';
 import { callDurationSql, readCallQaPolicy } from './policy.js';
 import { nanoid } from 'nanoid';
-import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { bakuReviewDay, previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { quotaFor } from '../qaAutomation/quota.js';
 import { assignAutomaticCallQaTask } from './automaticAssignment.js';
 import { CallQaServiceError } from './errors.js';
@@ -11,6 +11,7 @@ import { appendCallQaOperationalEvent } from './operationalEvents.js';
 import { captureContactContext } from '../contactContext/context.js';
 import { syncCallCatalog } from './sync.js';
 import { callSyncError, callSyncFailureCode } from './syncDiagnostics.js';
+import { recordDeliveryItem } from '../qaAutomation/dailyRepository.js';
 const MAX_ASSIGNMENTS_PER_CYCLE = 32;
 const MAX_CANDIDATES_PER_CYCLE = 500;
 const MAX_PREPARATIONS_PER_CYCLE = 64;
@@ -88,9 +89,9 @@ export async function prepareSelectedCallRecording(dependencies, input) {
         throw error;
     }
 }
-async function syncPreviousDay(dependencies, signal) {
+async function syncPreviousDay(dependencies, signal, reviewDate) {
     const now = nowFrom(dependencies.clock);
-    const day = previousBakuDay(now);
+    const day = reviewDate ? bakuReviewDay(reviewDate) : previousBakuDay(now);
     const correlationId = nanoid(24);
     try {
         if (!dependencies.source || !dependencies.normalizationProtection)
@@ -132,8 +133,8 @@ async function syncPreviousDay(dependencies, signal) {
         throw callSyncError(error);
     }
 }
-function candidateSourceIds(dependencies) {
-    const day = previousBakuDay(nowFrom(dependencies.clock));
+function candidateSourceIds(dependencies, reviewDate, deliveryDate) {
+    const day = reviewDate ? bakuReviewDay(reviewDate) : previousBakuDay(nowFrom(dependencies.clock));
     const duration = callDurationSql(dependencies.db, 'records');
     // A cancelled task frees its recording again, as for chats.
     return dependencies.db
@@ -149,6 +150,7 @@ function candidateSourceIds(dependencies) {
          AND ${callDirectionSql(dependencies.db, 'records')}
          AND ${duration.sql}
          AND ${unusableSql(dependencies.db, 'call', 'records.id')}
+         ${deliveryDate ? `AND NOT EXISTS(SELECT 1 FROM qa_daily_delivery_items i WHERE i.review_date=? AND i.channel='call' AND i.source_id=records.id)` : ''}
          AND NOT EXISTS(SELECT 1 FROM call_qa_tasks tasks
            WHERE tasks.source_record_id=records.id AND tasks.status<>'cancelled')
        ORDER BY
@@ -157,7 +159,7 @@ function candidateSourceIds(dependencies) {
           WHERE tasks.agent_id=records.agent_id AND prior.baku_date=records.baku_date
             AND tasks.status<>'cancelled') ASC,
          RANDOM() LIMIT ?`)
-        .all(day.date, ...duration.params, MAX_CANDIDATES_PER_CYCLE);
+        .all(day.date, ...duration.params, ...(deliveryDate ? [deliveryDate] : []), MAX_CANDIDATES_PER_CYCLE);
 }
 /** Source I/O precedes the immediate transaction inside assignAutomaticCallQaTask. */
 export function createCallQaAutomation(dependencies) {
@@ -170,27 +172,38 @@ export function createCallQaAutomation(dependencies) {
             enforceRosterQuota: true,
             signal,
         }),
-        async run(signal, assignEnabled = false, syncCatalog = true) {
+        async run(signal, assignEnabled = false, syncCatalog = true, reviewDate, deliveryDate) {
             if (signal.aborted)
                 throw new Error('call qa automation aborted');
             if (syncCatalog)
-                await syncPreviousDay(dependencies, signal);
+                await syncPreviousDay(dependencies, signal, reviewDate);
             // The call policy can switch automatic call reviews off on its own.
             if (!assignEnabled || !readCallQaPolicy(dependencies.db).enabled)
-                return;
+                return { done: true, assigned: 0 };
             if (!dependencies.recordingClient || !dependencies.recordingStore)
                 throw new Error('call qa recording dependency unavailable');
             let assigned = 0;
             let attempted = 0;
             let failed = 0;
-            for (const candidate of candidateSourceIds(dependencies)) {
+            const candidates = candidateSourceIds(dependencies, reviewDate, deliveryDate);
+            let bounded = Boolean(deliveryDate && candidates.length === MAX_CANDIDATES_PER_CYCLE);
+            const skip = (id) => {
+                if (deliveryDate)
+                    dependencies.db
+                        .transaction(() => recordDeliveryItem(dependencies.db, deliveryDate, 'call', id, null))
+                        .immediate();
+            };
+            for (const candidate of candidates) {
                 if (signal.aborted)
                     throw new Error('call qa automation aborted');
-                if (assigned >= MAX_ASSIGNMENTS_PER_CYCLE || attempted >= MAX_PREPARATIONS_PER_CYCLE)
+                if (assigned >= MAX_ASSIGNMENTS_PER_CYCLE || attempted >= MAX_PREPARATIONS_PER_CYCLE) {
+                    bounded = true;
                     break;
-                if (!quotaFor(dependencies.db, candidate.agent_id, nowFrom(dependencies.clock), 'call')
-                    .allowed)
+                }
+                if (!quotaFor(dependencies.db, candidate.agent_id, nowFrom(dependencies.clock), 'call', reviewDate).allowed) {
+                    skip(candidate.id);
                     continue;
+                }
                 attempted += 1;
                 try {
                     await prepareSelectedCallRecording(dependencies, {
@@ -204,6 +217,8 @@ export function createCallQaAutomation(dependencies) {
                         sourceRecordId: candidate.id,
                         clock: dependencies.clock,
                         enforceRosterQuota: true,
+                        reviewDate,
+                        deliveryDate,
                         signal,
                     });
                     assigned += 1;
@@ -211,16 +226,21 @@ export function createCallQaAutomation(dependencies) {
                 catch (error) {
                     if (signal.aborted)
                         throw error;
-                    if (error instanceof CallQaServiceError && error.code === 'reviewer_unavailable')
+                    if (error instanceof CallQaServiceError && error.code === 'reviewer_unavailable') {
+                        bounded = false;
                         break;
+                    }
                     if (error instanceof CallQaServiceError &&
-                        ['quota_unavailable', 'duplicate_task'].includes(error.code))
+                        ['quota_unavailable', 'duplicate_task'].includes(error.code)) {
+                        skip(candidate.id);
                         continue;
+                    }
                     failed += 1;
                 }
             }
             if (failed)
                 throw new Error('call qa automatic assignment incomplete');
+            return { done: !bounded, assigned };
         },
     };
 }

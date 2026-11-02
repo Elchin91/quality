@@ -1,14 +1,8 @@
 import { ordinarySourcePredicate, regularTaskPredicate } from '../qaPurpose.js';
 import { unusableSql } from '../qaUnusable/unusable.js';
 import { listReviewerReadiness } from '../reviewerAssignment/repository.js';
+import { taskContactDateSql } from '../contactPeriod.js';
 const BAKU_OFFSET_MS = 4 * 60 * 60 * 1_000;
-function bakuMonthBounds(now) {
-    const local = new Date(now.getTime() + BAKU_OFFSET_MS);
-    return {
-        start: Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), 1) - BAKU_OFFSET_MS,
-        end: Date.UTC(local.getUTCFullYear(), local.getUTCMonth() + 1, 1) - BAKU_OFFSET_MS,
-    };
-}
 function parseStrings(value) {
     try {
         const parsed = JSON.parse(value);
@@ -34,7 +28,7 @@ export function samplingInput(db, now) {
         externalAgentIds: parseStrings(row.external_agent_ids_json),
         eligibilityState: row.eligibility_state,
     }));
-    const bounds = bakuMonthBounds(now);
+    const month = new Date(now.getTime() + BAKU_OFFSET_MS).toISOString().slice(0, 7);
     const monthlyTaskCounts = db
         .prepare(`SELECT tasks.agent_id AS agentId,
       SUM(CASE WHEN tasks.status IN ('assigned','in_progress') THEN 1 ELSE 0 END) automaticOpenCount,
@@ -43,9 +37,8 @@ export function samplingInput(db, now) {
     WHERE tasks.assignment_origin='automatic' AND tasks.status<>'cancelled'
       AND ${regularTaskPredicate(db, 'chat_qa_tasks', 'tasks')}
       AND tasks.agent_id IS NOT NULL AND tasks.agent_id<>''
-      AND COALESCE(records.completed_at_utc,tasks.created_at)>=?
-      AND COALESCE(records.completed_at_utc,tasks.created_at)<? GROUP BY tasks.agent_id`)
-        .all(bounds.start, bounds.end);
+      AND substr(${taskContactDateSql(db, 'chat', 'tasks')},1,7)=? GROUP BY tasks.agent_id`)
+        .all(month);
     const defaultCapacity = db.prepare('SELECT reviewer_open_cap FROM chat_sampling_policy WHERE id=1').get().reviewer_open_cap;
     const reviewers = listReviewerReadiness(db, defaultCapacity).map((reviewer) => ({
         userId: reviewer.userId,

@@ -18,6 +18,8 @@ import { listReviewerReadiness, monthlyAssignments } from '../reviewerAssignment
 import { SOURCE_DIAGNOSTICS } from '../chatQa/sourceDiagnostics.js';
 import { lastDirectorySync } from '../callsDirectory/sync.js';
 import { callDirectionSql } from '../callsDirectory/groups.js';
+import { automationDailyStatus } from '../qaAutomation/dailyStatus.js';
+import { reconcileDailyDeliveries } from '../qaAutomation/dailyRepository.js';
 const linkBody = z.object({ agent_id: z.string().min(1).max(128) }).strict();
 const settingBody = z.object({ enabled: z.boolean() }).strict();
 const personKey = z.string().min(1).max(250);
@@ -83,7 +85,7 @@ function lastChannelSync(db) {
     };
 }
 /** Per-reviewer view of why work does or does not reach them. */
-function reviewerBoard(db, readiness, nowMs) {
+function reviewerBoard(db, readiness, nowMs, reviewerMonth = bakuMonth(nowMs)) {
     const month = monthlyAssignments(db, readiness.map(({ userId }) => userId), nowMs);
     const names = new Map(db.prepare("SELECT id,name FROM users WHERE role='reviewer'").all().map((row) => [row.id, row.name]));
     const count = (status, userId) => ['chat_qa_tasks', 'call_qa_tasks'].reduce((sum, table) => sum +
@@ -93,9 +95,9 @@ function reviewerBoard(db, readiness, nowMs) {
             .get(userId, status) ?? 0), 0);
     return {
         period: {
-            month: bakuMonth(nowMs),
+            month: reviewerMonth,
             timezone: 'Asia/Baku',
-            ...bakuMonthBounds(bakuMonth(nowMs)),
+            ...bakuMonthBounds(reviewerMonth),
         },
         reviewers: readiness.map((row) => ({
             id: row.userId,
@@ -106,7 +108,7 @@ function reviewerBoard(db, readiness, nowMs) {
             not_started: count('assigned', row.userId),
             in_progress: count('in_progress', row.userId),
             month_total: month.get(row.userId) ?? 0,
-            ...reviewerMetrics(db, row.userId, nowMs),
+            ...reviewerMetrics(db, row.userId, nowMs, reviewerMonth),
         })),
         last_rebalance: lastRebalance(db),
     };
@@ -117,6 +119,13 @@ export function createQaAutomationRouter(db, options = {}) {
     for (const base of ['/admin/chat-qa/automation', '/admin/call-qa/automation']) {
         router.get([`${base}/status`, `${base}/preview`], (_req, res) => {
             const now = Date.now();
+            const requestedMonth = z
+                .string()
+                .regex(/^\d{4}-(0[1-9]|1[0-2])$/u)
+                .optional()
+                .safeParse(_req.query.reviewer_month);
+            if (!requestedMonth.success)
+                return res.status(400).json({ error: 'invalid_input' });
             const bounds = previousBakuDay(now);
             const month = bounds.date.slice(0, 7);
             const snapshot = readRosterSnapshot(db, month);
@@ -178,8 +187,13 @@ export function createQaAutomationRouter(db, options = {}) {
            WHERE type='chat_scheduled_cycle' ORDER BY created_at DESC,id DESC LIMIT 1`)
                 .get();
             const lastFullSyncJob = db
-                .prepare(`SELECT status,error_code,started_at,completed_at FROM durable_jobs WHERE type='chat_scheduled_cycle' AND COALESCE(json_extract(payload_json,'$.sync_catalog'),1)<>0 ORDER BY created_at DESC,id DESC LIMIT 1`)
+                .prepare(`SELECT status,error_code,started_at,completed_at FROM durable_jobs WHERE type='chat_scheduled_cycle'
+           AND json_extract(payload_json,'$.sync_operation_id') IS NULL
+           AND json_extract(payload_json,'$.daily_channel') IS NULL
+           AND json_extract(payload_json,'$.roster_refresh') IS NULL
+           AND COALESCE(json_extract(payload_json,'$.sync_catalog'),1)<>0 ORDER BY created_at DESC,id DESC LIMIT 1`)
                 .get();
+            const daily = automationDailyStatus(db, month, now);
             res.json({
                 enabled: getAutomationEnabled(db),
                 updated_at_ms: setting.updated_at_ms,
@@ -199,10 +213,14 @@ export function createQaAutomationRouter(db, options = {}) {
                 operators,
                 agent_choices: db.prepare('SELECT id,name FROM agents ORDER BY name,id').all(),
                 last_job: lastJob ?? null,
-                last_full_sync_job: lastFullSyncJob ?? null,
+                last_full_sync_job: daily.activated ? daily.full_sync : (lastFullSyncJob ?? null),
+                full_sync_verified: daily.full_sync_verified,
+                daily_deliveries: daily.daily_deliveries,
+                next_run_at: daily.next_run_at,
+                roster_status: daily.roster_status,
                 directory: lastDirectorySync(db),
                 last_channel_sync: lastChannelSync(db),
-                reviewer_board: reviewerBoard(db, reviewerReadiness, now),
+                reviewer_board: reviewerBoard(db, reviewerReadiness, now, requestedMonth.data),
                 reviewers: {
                     total: reviewerReadiness.length,
                     ready: reviewerReadiness.filter((item) => item.ready).length,
@@ -285,18 +303,13 @@ export function createQaAutomationRouter(db, options = {}) {
             const now = Date.now();
             db.transaction(() => {
                 const wasEnabled = getAutomationEnabled(db);
+                if (!wasEnabled)
+                    reconcileDailyDeliveries(db, now);
                 setAutomationEnabled(db, {
                     enabled: parsed.data.enabled,
                     adminUserId: req.user.id,
                     nowMs: now,
                 });
-                if (!wasEnabled && parsed.data.enabled)
-                    new DurableJobRepository(db).enqueue({
-                        type: 'chat_scheduled_cycle',
-                        payload: { trigger: 'manual', sync_catalog: false },
-                        idempotencyKey: `qa-enabled-${nanoid(16)}`,
-                        now,
-                    });
             })();
             return res.json({ enabled: parsed.data.enabled, updated_at_ms: now });
         });

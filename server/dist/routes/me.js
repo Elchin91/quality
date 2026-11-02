@@ -113,7 +113,8 @@ meRouter.get('/me/summary', requireAgent, (req, res) => {
     const projection = effectiveEvaluationProjection();
     const effectiveScore = effectiveScoreSql();
     const totals = db
-        .prepare(`SELECT COUNT(*) AS total_evaluations, COALESCE(AVG(${effectiveScore}), 0) AS avg_score
+        .prepare(`SELECT COUNT(*) AS total_evaluations, COALESCE(AVG(${effectiveScore}), 0) AS avg_score,
+        COALESCE(SUM(${businessDateSql()} IS NULL),0) AS unknown_contact_date_count
          FROM evaluations e ${projection.joins} WHERE e.agent_id = ?`)
         .get(req.agentId);
     const month = bakuDate(Date.now()).slice(0, 7);
@@ -123,14 +124,14 @@ meRouter.get('/me/summary', requireAgent, (req, res) => {
          WHERE e.agent_id = ? AND substr(${businessDateSql()}, 1, 7) = ?`)
         .get(req.agentId, month);
     const trendRows = db
-        .prepare(`SELECT e.created_at, ${effectiveScore} AS score FROM evaluations e
+        .prepare(`SELECT ${businessDateSql()} AS contact_date, ${effectiveScore} AS score FROM evaluations e
          ${projection.joins}
-         WHERE e.agent_id = ? AND e.created_at >= ?
-         ORDER BY e.created_at ASC`)
-        .all(req.agentId, Date.now() - 30 * 86_400_000);
+         WHERE e.agent_id = ? AND ${businessDateSql()} >= ? AND ${businessDateSql()} <= ?
+         ORDER BY contact_date ASC`)
+        .all(req.agentId, bakuDate(Date.now() - 29 * 86_400_000), bakuDate(Date.now()));
     const byDay = {};
     for (const r of trendRows) {
-        const day = bakuDate(r.created_at);
+        const day = r.contact_date;
         byDay[day] = byDay[day] || { sum: 0, n: 0 };
         byDay[day].sum += r.score;
         byDay[day].n += 1;
@@ -166,6 +167,8 @@ meRouter.get('/me/summary', requireAgent, (req, res) => {
     }));
     res.json({
         total_evaluations: totals.total_evaluations,
+        unknown_contact_date_count: totals.unknown_contact_date_count ?? 0,
+        period_basis: 'contact',
         avg_score: +Number(totals.avg_score).toFixed(2),
         this_month_count: monthly.this_month_count,
         this_month_avg: +Number(monthly.this_month_avg).toFixed(2),

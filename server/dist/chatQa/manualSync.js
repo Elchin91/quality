@@ -4,7 +4,8 @@ import { boundedOperation } from '../jobs/boundedOperation.js';
 import { syncChatCatalog } from './sync.js';
 import { SourceDiagnosticError, sourceDiagnosticFromError, sourceFailureDetailsFromError, } from './sourceDiagnostics.js';
 import { sourceFailureDetailsDto, sourceFailureDetailsJson } from './sourceFailureDetails.js';
-import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { bakuReviewDay, previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { readDelivery, retryDelivery, updateDelivery } from '../qaAutomation/dailyRepository.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 const MIN_CHUNK_MS = 60_000;
 const PROGRESS_INTERVAL_MS = 2_000;
@@ -64,6 +65,7 @@ function enqueueChunk(db, row, now) {
         payload: { trigger: 'manual', sync_operation_id: row.id },
         idempotencyKey: `chat-source-${row.id}-${row.cursor_at}-${row.batch_window_ms}`,
         now,
+        ...(row.requested_by === 'system:daily' ? { maxAttempts: 1 } : {}),
     });
     db.prepare('UPDATE chat_source_sync_operations SET job_id=?,updated_at=? WHERE id=?').run(job.id, now, row.id);
 }
@@ -104,11 +106,20 @@ export function enqueueManualChatSync(input) {
                 return dto(effective);
             db.prepare("UPDATE chat_source_sync_operations SET status='failed',error_code='sync_cancelled',completed_at=? WHERE id=?").run(now, active.id);
         }
-        const { start, end } = previousBakuDay(now);
+        const { start, end } = input.reviewDate
+            ? bakuReviewDay(input.reviewDate)
+            : previousBakuDay(now);
+        const previous = input.reviewDate
+            ? db
+                .prepare(`SELECT * FROM chat_source_sync_operations
+        WHERE mode='apply' AND status IN ('failed','partial') AND window_from=? AND window_to=?
+        ORDER BY created_at DESC,rowid DESC LIMIT 1`)
+                .get(start, end)
+            : undefined;
         const id = nanoid();
         db.prepare(`INSERT INTO chat_source_sync_operations
       (id,mode,status,requested_by,window_from,window_to,cursor_at,created_at,updated_at)
-      VALUES (?,?,'queued',?,?,?,?,?,?)`).run(id, input.dryRun ? 'dry_run' : 'apply', input.actorUserId, start, end, start, now, now);
+      VALUES (?,?,'queued',?,?,?,?,?,?)`).run(id, input.dryRun ? 'dry_run' : 'apply', input.actorUserId, start, end, previous?.cursor_at ?? start, now, now);
         enqueueChunk(db, read(db, id), now);
         return getManualChatSync(db, id);
     })
@@ -129,7 +140,7 @@ export async function runManualChatSync(input) {
     if (activeRun)
         throw new Error('sync_in_progress');
     const reviewDay = previousBakuDay(operation.created_at);
-    if (operation.window_from !== reviewDay.start || operation.window_to !== reviewDay.end) {
+    if (operation.window_to - operation.window_from !== 86_400_000) {
         // Upgrade an unfinished legacy backlog without deleting any imported records/tasks.
         db.prepare(`UPDATE chat_source_sync_operations
       SET window_from=?,window_to=?,cursor_at=?,chunks_completed=0,conversations_seen=0,
@@ -190,6 +201,7 @@ export async function runManualChatSync(input) {
         error_code=?,error_details_json=?,completed_at=?,updated_at=? WHERE id=?`).run(succeeded ? (done ? 'succeeded' : 'queued') : result.status, succeeded ? end : operation.cursor_at, succeeded ? 1 : 0, result.conversationsSeen, result.eligibleCount, result.excludedCount, result.errorCode, sourceFailureDetailsJson(result.errorDetails), done || !succeeded ? clock().getTime() : null, clock().getTime(), operation.id);
             if (succeeded && !done)
                 enqueueChunk(db, read(db, operation.id), clock().getTime());
+            dailyCheckpoint(db, operation, done ? null : succeeded ? undefined : (result.errorCode ?? 'source_catalog_failed'), clock().getTime());
         }).immediate();
     }
     catch (error) {
@@ -209,5 +221,19 @@ export async function runManualChatSync(input) {
             return;
         }
         db.prepare("UPDATE chat_source_sync_operations SET status='failed',error_code=?,error_details_json=?,completed_at=?,updated_at=? WHERE id=? AND cursor_at=?").run(sourceDiagnosticFromError(error), sourceFailureDetailsJson(sourceFailureDetailsFromError(error)), clock().getTime(), clock().getTime(), operation.id, operation.cursor_at);
+        dailyCheckpoint(db, operation, sourceDiagnosticFromError(error), clock().getTime());
     }
+}
+function dailyCheckpoint(db, operation, error, now) {
+    if (operation.requested_by !== 'system:daily' || error === undefined)
+        return;
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='qa_daily_deliveries'").get())
+        return;
+    const date = new Date(operation.window_from + 4 * 3_600_000).toISOString().slice(0, 10);
+    if (!readDelivery(db, date, 'chat'))
+        return;
+    if (error)
+        retryDelivery(db, date, 'chat', error, now);
+    else
+        updateDelivery(db, date, 'chat', { next_retry_at: now }, now);
 }

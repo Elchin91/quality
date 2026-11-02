@@ -1,3 +1,6 @@
+import { reconcileDailyDeliveries } from '../qaAutomation/dailyRepository.js';
+import { ensureDeliveryRoster } from '../qaAutomation/rosterReadiness.js';
+import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { purgeExpiredAppEvents } from '../realtime/appEvents.js';
 import { nextBakuNine, purgeExpiredEvidence, runChatQaCycle, runSlaJobs, } from '../chatQa/scheduler.js';
 import { DurableJobRepository } from './repository.js';
@@ -24,6 +27,15 @@ export function createMaintenanceHandlers(input) {
         chat_scheduled_cycle: async (payload, signal, context) => {
             if (signal.aborted)
                 throw new Error('job aborted');
+            if (payload.roster_refresh) {
+                await ensureDeliveryRoster({
+                    db: input.db,
+                    now: clock().getTime(),
+                    reviewDate: previousBakuDay(clock()).date,
+                    signal,
+                });
+                return;
+            }
             if (payload.sync_operation_id) {
                 await runManualChatSync({
                     db: input.db,
@@ -36,7 +48,16 @@ export function createMaintenanceHandlers(input) {
                 return;
             }
             if (input.automationCycle) {
-                await input.automationCycle(signal, payload.sync_catalog !== false);
+                // Old refill jobs must not reopen a daily delivery after an upgrade.
+                if (payload.sync_catalog === false)
+                    return;
+                await input.automationCycle(signal, true, payload.daily_review_date && payload.daily_channel
+                    ? {
+                        reviewDate: payload.daily_review_date,
+                        channel: payload.daily_channel,
+                        jobId: context?.jobId,
+                    }
+                    : undefined);
                 if (signal.aborted)
                     throw new Error('job aborted');
                 return;
@@ -129,16 +150,18 @@ export function scheduleDurableChatQaJobs(input) {
     const scheduleAutomation = () => {
         if (closed || !input.automationCycle)
             return;
-        const now = clock();
-        const next = Math.floor(now.getTime() / 900_000 + 1) * 900_000;
         cycleTimer = setTimer(() => {
             cycleTimer = null;
-            const fired = clock();
-            // The daily catalog job also assigns; avoid a competing cycle in its 09:00 slot.
-            if (!closed && !(fired.getUTCHours() === 5 && fired.getUTCMinutes() < 15))
-                enqueueWithRetry('chat_scheduled_cycle', fired, false);
-            scheduleAutomation();
-        }, Math.max(1, next - now.getTime()));
+            try {
+                reconcileDailyDeliveries(input.db, clock().getTime());
+            }
+            catch {
+                /* The persisted queue is reconciled next minute. */
+            }
+            finally {
+                scheduleAutomation();
+            }
+        }, 60_000);
     };
     const schedule = () => {
         if (closed)
@@ -147,7 +170,9 @@ export function scheduleDurableChatQaJobs(input) {
         timer = setTimer(() => {
             timer = null;
             const fired = clock();
-            if (input.automationCycle || input.sourceEnabled !== false)
+            if (input.automationCycle)
+                reconcileDailyDeliveries(input.db, fired.getTime());
+            else if (input.sourceEnabled !== false)
                 enqueueWithRetry('chat_scheduled_cycle', fired);
             enqueueWithRetry('chat_sla_scan', fired);
             enqueueWithRetry('chat_retention_purge', fired);
@@ -158,12 +183,12 @@ export function scheduleDurableChatQaJobs(input) {
     schedule();
     const started = clock();
     const dailyDue = started.getTime() >= Date.parse(`${bakuDay(started)}T09:00:00+04:00`);
-    const daily = dailyDue && (input.automationCycle || input.sourceEnabled !== false)
+    const daily = dailyDue && !input.automationCycle && input.sourceEnabled !== false
         ? enqueueWithRetry('chat_scheduled_cycle', started)
         : undefined;
+    void daily;
     if (input.automationCycle) {
-        if (!dailyDue || daily?.status === 'succeeded')
-            enqueueWithRetry('chat_scheduled_cycle', started, false);
+        reconcileDailyDeliveries(input.db, started.getTime());
         scheduleAutomation();
     }
     return {

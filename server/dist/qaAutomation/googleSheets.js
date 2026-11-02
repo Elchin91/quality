@@ -1,7 +1,7 @@
 import { parseRosterCsv } from './rosterParser.js';
 import { readRosterSnapshot, rosterIsFresh, saveRosterCsv } from './repository.js';
 import { bakuMonth, bakuMonthBounds } from './types.js';
-import { previousBakuDay } from './reviewWindow.js';
+import { bakuReviewDay, previousBakuDay } from './reviewWindow.js';
 const SPREADSHEET_ID = '1Op_ql7ry7sL6-4_j_-byBzTTJ0PAE1vNDwTDBILwnXs';
 const DOCUMENT_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}`;
 export class RosterLoadError extends Error {
@@ -211,7 +211,7 @@ export async function fetchCurrentRosterCsv(input = {}) {
 export async function refreshCurrentRoster(db, input = {}) {
     const now = input?.now ?? Date.now();
     const nowMs = now instanceof Date ? now.getTime() : now;
-    const reviewDay = previousBakuDay(now);
+    const reviewDay = input?.reviewDate ? bakuReviewDay(input.reviewDate) : previousBakuDay(now);
     const month = input?.month ?? reviewDay.date.slice(0, 7);
     const csv = await fetchCurrentRosterCsv({
         ...input,

@@ -66,7 +66,8 @@ function performReassignment(input, automatic, expectedReviewerUserId) {
                 donor: current.reviewer_user_id,
                 receiver: selectedReviewer.userId,
                 group: 'customer_support',
-                createdAt: current.created_at,
+                taskId: current.id,
+                channel: 'chat',
                 now: nowMs,
             });
         const explanation = automatic

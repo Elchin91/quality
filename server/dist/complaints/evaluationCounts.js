@@ -1,4 +1,5 @@
 import { hasQaColumn } from '../qaPurpose.js';
+import { contactDateSql } from '../contactPeriod.js';
 /** Counts completed scores, not task reservations; linking a regular score never changes its purpose. */
 export function complaintEvaluationCounts(db, complaintId, now = Date.now()) {
     if (!hasQaColumn(db, 'evaluations', 'purpose') ||
@@ -11,10 +12,8 @@ export function complaintEvaluationCounts(db, complaintId, now = Date.now()) {
         .all(complaintId);
     return agents.map((agent) => {
         const rows = db
-            .prepare(`SELECT purpose,COUNT(*) count FROM evaluations
-      WHERE agent_id=? AND status='completed' AND substr(COALESCE(
-        json_extract(CASE WHEN json_valid(source_metadata_json) THEN source_metadata_json ELSE '{}' END,'$.contact_date'),
-        date(created_at/1000,'unixepoch','+4 hours')),1,7)=? GROUP BY purpose`)
+            .prepare(`SELECT purpose,COUNT(*) count FROM evaluations e
+      WHERE agent_id=? AND status='completed' AND substr(${contactDateSql()},1,7)=? GROUP BY purpose`)
             .all(agent.id, month);
         const regular = rows.find((row) => row.purpose === 'regular')?.count ?? 0;
         const complaint = rows.find((row) => row.purpose === 'complaint')?.count ?? 0;

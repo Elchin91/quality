@@ -11,13 +11,23 @@ const scheduledOptions = z
     .object({
     trigger: z.enum(['scheduled', 'manual']).optional(),
     sync_catalog: z.boolean().optional(),
+    daily_review_date: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/u)
+        .optional(),
+    daily_channel: z.enum(['chat', 'call']).optional(),
+    roster_refresh: z.boolean().optional(),
     sync_operation_id: z
         .string()
         .regex(/^[A-Za-z0-9_-]{1,200}$/u)
         .optional(),
 })
     .strict()
-    .refine((value) => !value.sync_operation_id || value.trigger === 'manual');
+    .refine((value) => !value.sync_operation_id || value.trigger === 'manual')
+    .refine((value) => Boolean(value.daily_review_date) === Boolean(value.daily_channel))
+    .refine((value) => !value.daily_channel || (!value.sync_operation_id && value.sync_catalog === undefined))
+    .refine((value) => !value.roster_refresh ||
+    (!value.daily_channel && !value.sync_operation_id && value.sync_catalog === undefined));
 export const JOB_PAYLOAD_SCHEMAS = {
     chat_sla_scan: emptyOptions,
     chat_retention_purge: emptyOptions,

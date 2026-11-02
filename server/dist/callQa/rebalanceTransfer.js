@@ -70,7 +70,8 @@ export function transferAutomaticCallTask(input) {
                 donor: current.reviewer_user_id,
                 receiver: reviewerUserId,
                 group: current.scorecard_kind === 'telesales' ? 'telesales' : 'customer_support',
-                createdAt: Date.parse(createdAt),
+                taskId,
+                channel: 'call',
                 now: date.getTime(),
             });
         }

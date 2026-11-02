@@ -116,7 +116,8 @@ export async function verifyPendingCandidates(input) {
         let missing = need - eligibleSupply(db, agentId, day);
         if (missing <= 0)
             return;
-        const rows = shuffled(pendingFor.all(SOURCE_SYSTEM, agentId, day.start, day.end), randomIndex).slice(0, missing * ATTEMPTS_PER_NEEDED_CHAT + EXTRA_ATTEMPTS);
+        const allRows = shuffled(pendingFor.all(SOURCE_SYSTEM, agentId, day.start, day.end), randomIndex);
+        const rows = allRows.slice(0, missing * ATTEMPTS_PER_NEEDED_CHAT + EXTRA_ATTEMPTS);
         for (const row of rows) {
             if (missing <= 0 || consecutiveFailures >= MAX_CONSECUTIVE_FAILURES)
                 return;
@@ -128,6 +129,8 @@ export async function verifyPendingCandidates(input) {
             if (outcome === 'eligible')
                 missing--;
         }
+        if (missing > 0 && allRows.length > rows.length)
+            result.moreWork = true;
     }, input.signal);
     return result;
 }
@@ -166,4 +169,5 @@ export async function verifyPendingForReviewDay(input, reviewDay, now, rosterRem
     });
     if (result.attempted)
         logger.info(result, 'chat pending candidates verified');
+    return result;
 }

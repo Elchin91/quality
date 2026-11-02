@@ -9,6 +9,8 @@ services:
       - "${QUALITY_ENV_FILE:-.env}"
     environment:
       NODE_ENV: production
+      # The server renders the assistant UI; generation remains local-only.
+      ASK_AI_ENABLED: "${ASK_AI_ENABLED:-false}"
       HOST: 0.0.0.0
       PORT: "8787"
       DATA_DIR: /var/lib/agentscore-storage/data

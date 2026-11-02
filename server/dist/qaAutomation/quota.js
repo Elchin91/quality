@@ -1,6 +1,6 @@
 import { getAutomationEnabled, readRosterSnapshot, rosterIsFresh } from './repository.js';
 import { monthlyAssignedTaskCounts, reviewDayAssignedCount } from './channelQuota.js';
-import { previousBakuDay } from './reviewWindow.js';
+import { bakuReviewDay, previousBakuDay } from './reviewWindow.js';
 import { telesalesPeople } from './fixedSchedule.js';
 import { bakuMonth, bakuMonthBounds, cumulativeShiftTarget, MONTHLY_EVALUATION_TARGET, shiftStartMs, shiftEndMs, } from './types.js';
 function clockMs(now) {
@@ -53,8 +53,8 @@ export function operatorChannelCapacity(db, agentId, recordDate, channel) {
     const used = monthlyAssignedTaskCounts(db, agentId, month, channel).total;
     return { mixed, used, remaining: operatorMonthlyCapacity(db, agentId, recordDate).remaining };
 }
-function result(db, person, agentId, linkOrigin, month, nowMs, fresh, enabled, requestedChannel) {
-    const reviewDay = previousBakuDay(nowMs);
+function result(db, person, agentId, linkOrigin, month, nowMs, fresh, enabled, requestedChannel, reviewDate) {
+    const reviewDay = reviewDate ? bakuReviewDay(reviewDate) : previousBakuDay(nowMs);
     const monthStart = bakuMonthBounds(month).start;
     let shifts = person.shifts;
     let carryFresh = true;
@@ -77,9 +77,13 @@ function result(db, person, agentId, linkOrigin, month, nowMs, fresh, enabled, r
     // schedule), so a mid-month start or a reset never piles a backlog onto one agent.
     const dailyLimit = shifts.length ? Math.ceil(MONTHLY_EVALUATION_TARGET / shifts.length) : 0;
     const reviewDayUsed = agentId ? reviewDayAssignedCount(db, agentId, reviewDay) : 0;
+    const usedThroughDay = agentId
+        ? monthlyAssignedTaskCounts(db, agentId, month, 'chat', reviewDay.date).total +
+            monthlyAssignedTaskCounts(db, agentId, month, 'call', reviewDay.date).total
+        : 0;
     const totalRemaining = hasUnknownShift || !workedPreviousDay
         ? 0
-        : Math.max(0, Math.min(Math.min(MONTHLY_EVALUATION_TARGET, due) - used, dailyLimit - reviewDayUsed));
+        : Math.max(0, Math.min(MONTHLY_EVALUATION_TARGET - used, due - usedThroughDay, dailyLimit - reviewDayUsed));
     const remaining = totalRemaining;
     let reason;
     if (!fresh || !carryFresh)
@@ -143,11 +147,11 @@ function emptyQuota(month, agentId, reason) {
     };
 }
 /** Recheck this inside the task-creation transaction, after any external recording work. */
-export function quotaFor(db, agentId, now, channel) {
+export function quotaFor(db, agentId, now, channel, reviewDate) {
     if (!agentId || !['chat', 'call'].includes(channel))
         throw new Error('invalid quota subject');
     const nowMs = clockMs(now);
-    const month = previousBakuDay(nowMs).date.slice(0, 7);
+    const month = (reviewDate ? bakuReviewDay(reviewDate) : previousBakuDay(nowMs)).date.slice(0, 7);
     const snapshot = readRosterSnapshot(db, month);
     const link = snapshot ? rosterLink(db, agentId, month) : undefined;
     const person = snapshot?.people.find((entry) => entry.key === link?.person_key);
@@ -156,30 +160,30 @@ export function quotaFor(db, agentId, now, channel) {
         const fixed = telesalesPeople(db, month, nowMs, agentId)[0];
         if (fixed)
             return {
-                ...result(db, fixed.person, agentId, 'system', month, nowMs, fixed.fresh, getAutomationEnabled(db), channel),
+                ...result(db, fixed.person, agentId, 'system', month, nowMs, fixed.fresh, getAutomationEnabled(db), channel, reviewDate),
                 group: 'telesales',
             };
         return emptyQuota(month, agentId, snapshot ? 'not_in_roster' : 'roster_unavailable');
     }
-    return result(db, person, agentId, link?.origin ?? null, month, nowMs, rosterIsFresh(snapshot, nowMs), getAutomationEnabled(db), channel);
+    return result(db, person, agentId, link?.origin ?? null, month, nowMs, rosterIsFresh(snapshot, nowMs), getAutomationEnabled(db), channel, reviewDate);
 }
 /** Read-only preview includes unconfirmed people without exposing their schedule to reviewers. */
-export function listRosterQuota(db, now) {
+export function listRosterQuota(db, now, reviewDate) {
     const nowMs = clockMs(now);
-    const month = previousBakuDay(nowMs).date.slice(0, 7);
+    const month = (reviewDate ? bakuReviewDay(reviewDate) : previousBakuDay(nowMs)).date.slice(0, 7);
     const snapshot = readRosterSnapshot(db, month);
     const enabled = getAutomationEnabled(db);
-    const rostered = snapshot ? snapshotQuota(db, snapshot, month, nowMs, enabled) : [];
+    const rostered = snapshot ? snapshotQuota(db, snapshot, month, nowMs, enabled, reviewDate) : [];
     const linked = new Set(rostered.map((row) => row.agentId).filter(Boolean));
     const fixed = telesalesPeople(db, month, nowMs)
         .filter(({ agentId }) => !linked.has(agentId))
         .map(({ person, agentId, fresh }) => ({
-        ...result(db, person, agentId, 'system', month, nowMs, fresh, enabled),
+        ...result(db, person, agentId, 'system', month, nowMs, fresh, enabled, undefined, reviewDate),
         group: 'telesales',
     }));
     return [...rostered, ...fixed];
 }
-function snapshotQuota(db, snapshot, month, nowMs, enabled) {
+function snapshotQuota(db, snapshot, month, nowMs, enabled, reviewDate) {
     const manual = db.prepare('SELECT person_key,agent_id FROM qa_roster_links').all();
     const manualAgentIds = new Set(manual.map((link) => link.agent_id));
     const linkedAgent = new Map(manual.map((link) => [link.person_key, { agentId: link.agent_id, origin: 'manual' }]));
@@ -194,6 +198,6 @@ function snapshotQuota(db, snapshot, month, nowMs, enabled) {
     const fresh = rosterIsFresh(snapshot, nowMs);
     return snapshot.people.map((person) => {
         const link = linkedAgent.get(person.key);
-        return result(db, person, link?.agentId ?? null, link?.origin ?? null, month, nowMs, fresh, enabled);
+        return result(db, person, link?.agentId ?? null, link?.origin ?? null, month, nowMs, fresh, enabled, undefined, reviewDate);
     });
 }

@@ -14,7 +14,7 @@ export const SOURCE_DIAGNOSTICS = {
     source_persistence_failed: 'Source catalog could not be saved',
 };
 export function safeSourceDiagnostic(code) {
-    return typeof code === 'string' && Object.hasOwn(SOURCE_DIAGNOSTICS, code)
+    return typeof code === 'string' && Object.prototype.hasOwnProperty.call(SOURCE_DIAGNOSTICS, code)
         ? code
         : 'source_preflight_failed';
 }

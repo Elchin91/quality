@@ -1,3 +1,4 @@
+import { deliveryItemExists } from '../qaAutomation/dailyRepository.js';
 import { purgeExpiredAiPayloads } from '../aiEvaluation/runPayloads.js';
 import { nanoid } from 'nanoid';
 import { sampleAutomaticTasks } from './assignment.js';
@@ -5,8 +6,9 @@ import { samplingInput } from './samplingRepository.js';
 import { verifyPendingForReviewDay } from './pendingVerification.js';
 import { createAutomaticTask } from './service.js';
 import { purgeExpiredAppEvents, writeAppEventIfReady } from '../realtime/appEvents.js';
-import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { bakuReviewDay, previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { syncPreviousDay } from './dailySync.js';
+import { sourceDiagnosticFromError } from './sourceDiagnostics.js';
 import { listRosterQuota, quotaFor } from '../qaAutomation/quota.js';
 import { CHAT_SCHEDULER_LEASE_MS } from './schema.js';
 import { assertSchedulerLease, persistSchedulerLeaseFailure, startSchedulerHeartbeat, } from './syncLease.js';
@@ -198,11 +200,17 @@ export async function runChatQaCycle(input) {
         let tasksCreated = 0;
         let syncStatus = null;
         let catalogQueued = false;
+        let moreWork = false;
+        let assignmentFailures = 0;
+        let syncError;
         if (settings.enabled === 1 || input.rosterMode) {
             if (input.signal?.aborted)
                 throw new Error('job aborted');
-            const catalog = await syncPreviousDay({ ...input, clock });
+            const catalog = input.assignmentOnly
+                ? { status: null, queued: false }
+                : await syncPreviousDay({ ...input, clock });
             syncStatus = catalog.status;
+            syncError = catalog.errorCode;
             catalogQueued = catalog.queued;
             assertSchedulerLease(input.db, runId, leaseGeneration, nowFrom(clock).getTime());
             if (!catalogQueued &&
@@ -211,26 +219,32 @@ export async function runChatQaCycle(input) {
                 if (input.signal?.aborted)
                     throw new Error('job aborted');
                 const rosterRemaining = input.rosterMode
-                    ? new Map(listRosterQuota(input.db, now)
+                    ? new Map(listRosterQuota(input.db, now, input.reviewDate)
                         .filter((row) => row.allowed && row.agentId && row.channel !== 'call')
                         .map((row) => [
                         row.agentId,
-                        quotaFor(input.db, row.agentId, now, 'chat').remaining,
+                        quotaFor(input.db, row.agentId, now, 'chat', input.reviewDate).remaining,
                     ]))
                     : undefined;
-                const reviewDay = previousBakuDay(now);
-                await verifyPendingForReviewDay(input, reviewDay, now, rosterRemaining);
+                const reviewDay = input.reviewDate ? bakuReviewDay(input.reviewDate) : previousBakuDay(now);
+                const verification = await verifyPendingForReviewDay(input, reviewDay, now, rosterRemaining);
+                if (input.deliveryDate)
+                    assignmentFailures += verification.failed;
+                moreWork = Boolean(input.deliveryDate && verification.moreWork);
                 const sampled = samplingInput(input.db, new Date(reviewDay.start));
                 const proposals = sampleAutomaticTasks({
                     ...sampled,
-                    candidates: sampled.candidates.filter((candidate) => candidate.completedAtUtc !== undefined &&
+                    candidates: sampled.candidates.filter((candidate) => !deliveryItemExists(input.db, input.deliveryDate, 'chat', candidate.interactionId) &&
+                        candidate.completedAtUtc !== undefined &&
                         candidate.completedAtUtc >= reviewDay.start &&
                         candidate.completedAtUtc < reviewDay.end),
                     monthlyTarget: 20,
                     reviewerOpenCap: settings.reviewer_open_cap,
                     maxAssignmentsByAgent: rosterRemaining,
                 }, input.randomIndex);
-                for (const proposal of proposals) {
+                const portion = input.deliveryDate ? proposals.slice(0, 32) : proposals;
+                moreWork ||= portion.length < proposals.length;
+                for (const proposal of portion) {
                     if (input.signal?.aborted)
                         throw new Error('job aborted');
                     assertSchedulerLease(input.db, runId, leaseGeneration, nowFrom(clock).getTime());
@@ -245,12 +259,16 @@ export async function runChatQaCycle(input) {
                             createId: input.createId,
                             randomIndex: input.randomIndex,
                             enforceRosterQuota: input.rosterMode,
+                            reviewDate: input.reviewDate,
+                            deliveryDate: input.deliveryDate,
                             signal: input.signal,
                         });
                         tasksCreated += 1;
                     }
                     catch {
-                        // One stale/source-failed candidate must not affect existing work or other proposals.
+                        if (input.deliveryDate)
+                            assignmentFailures++;
+                        // Existing assignments remain committed while unfinished candidates can retry.
                     }
                 }
             }
@@ -262,14 +280,18 @@ export async function runChatQaCycle(input) {
         if (input.includeMaintenance !== false)
             purgeExpiredAppEvents(input.db, nowFrom(clock).getTime());
         result = {
-            status: syncStatus === null || syncStatus === 'succeeded' ? 'succeeded' : 'failed',
+            status: !assignmentFailures && (syncStatus === null || syncStatus === 'succeeded')
+                ? 'succeeded'
+                : 'failed',
             ...(catalogQueued ? { syncStatus: 'queued' } : syncStatus === null ? {} : { syncStatus }),
             tasksCreated,
+            ...(syncError ? { errorCode: syncError } : {}),
+            ...(input.deliveryDate ? { moreWork } : {}),
             sla,
             purged,
         };
     }
-    catch {
+    catch (error) {
         try {
             const sla = input.includeMaintenance === false
                 ? { dueSoon: 0, overdue: 0 }
@@ -277,7 +299,7 @@ export async function runChatQaCycle(input) {
             const purged = input.includeMaintenance === false ? 0 : purgeExpiredEvidence({ db: input.db, clock });
             if (input.includeMaintenance !== false)
                 purgeExpiredAppEvents(input.db, nowFrom(clock).getTime());
-            result = { status: 'failed', sla, purged };
+            result = { status: 'failed', errorCode: sourceDiagnosticFromError(error), sla, purged };
         }
         catch {
             result = { status: 'failed' };
@@ -290,7 +312,7 @@ export async function runChatQaCycle(input) {
                 const changed = input.db
                     .prepare(`UPDATE chat_qa_scheduler_runs SET status=?,completed_at=?,error_code=?
           WHERE id=? AND status='running' AND lease_generation=? AND lease_expires_at>?`)
-                    .run(result.status === 'succeeded' ? 'succeeded' : 'failed', nowFrom(clock).getTime(), result.status === 'succeeded' ? null : 'cycle_failed', runId, leaseGeneration, nowFrom(clock).getTime()).changes;
+                    .run(result.status === 'succeeded' ? 'succeeded' : 'failed', nowFrom(clock).getTime(), result.status === 'succeeded' ? null : (result.errorCode ?? 'cycle_failed'), runId, leaseGeneration, nowFrom(clock).getTime()).changes;
                 if (changed !== 1)
                     result = { status: 'failed', errorCode: 'scheduler_lease_failed' };
             });
@@ -301,59 +323,4 @@ export async function runChatQaCycle(input) {
     }
     return result;
 }
-export function scheduleChatQaJobs(input) {
-    const clock = input.clock ?? (() => new Date());
-    const setTimeoutFn = input.setTimeoutFn ?? ((callback, delay) => setTimeout(callback, delay));
-    const clearTimeoutFn = input.clearTimeoutFn ?? ((handle) => clearTimeout(handle));
-    let timer = null;
-    let active = null;
-    let cycleError = null;
-    let closed = false;
-    let sourceClosed = false;
-    const schedule = () => {
-        if (closed)
-            return;
-        const delay = nextBakuNine(nowFrom(clock)).getTime() - nowFrom(clock).getTime();
-        timer = setTimeoutFn(() => {
-            timer = null;
-            cycleError = null;
-            active = (input.runCycle
-                ? input.runCycle()
-                : runChatQaCycle({ db: input.db, source: input.source, clock }))
-                .catch((error) => {
-                cycleError = error;
-            })
-                .finally(() => {
-                active = null;
-                schedule();
-            });
-        }, delay);
-    };
-    schedule();
-    return {
-        async close() {
-            if (!closed) {
-                closed = true;
-                if (timer !== null)
-                    clearTimeoutFn(timer);
-                timer = null;
-            }
-            if (active)
-                await active;
-            let closeError = null;
-            if (!sourceClosed) {
-                sourceClosed = true;
-                try {
-                    await input.source.close();
-                }
-                catch (error) {
-                    closeError = error;
-                }
-            }
-            if (cycleError)
-                throw cycleError;
-            if (closeError)
-                throw closeError;
-        },
-    };
-}
+export { scheduleChatQaJobs } from './legacyScheduler.js';

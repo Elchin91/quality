@@ -1,4 +1,5 @@
 import { regularTaskPredicate } from '../qaPurpose.js';
+import { taskContactDate } from '../contactPeriod.js';
 import { transferAutomaticCallTask } from '../callQa/rebalanceTransfer.js';
 import { rebalanceChatTask } from '../chatQa/taskLifecycle.js';
 import { balanceState, transferAllowed, transferImprovement, } from './balance.js';
@@ -137,7 +138,18 @@ export function rebalanceReviewerTasks(db, clock = () => new Date()) {
     for (let attempts = 0; attempts < MAX_MOVES; attempts++) {
         // Both groups use current global counts, including all moves already committed in this pass.
         const tasks = REVIEWER_GROUPS.flatMap((group) => movableTasks(db, group)).filter((row) => !failed.has(`${row.channel}:${row.id}`));
-        const choice = nextMove(balanceState(db, nowMs), tasks);
+        const dated = tasks
+            .map((task) => ({ task, date: taskContactDate(db, task.channel, task.id) }))
+            .filter((row) => row.date !== null);
+        const months = [...new Set(dated.map((row) => row.date.slice(0, 7)))].sort();
+        const choice = months
+            .map((month) => nextMove(balanceState(db, nowMs, month), dated
+            .filter((row) => row.date.startsWith(month))
+            .map(({ task, date }) => ({
+            ...task,
+            createdAt: Date.parse(`${date}T00:00:00+04:00`),
+        }))))
+            .find((move) => move !== undefined);
         if (!choice)
             break;
         try {

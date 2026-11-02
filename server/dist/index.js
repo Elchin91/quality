@@ -68,7 +68,7 @@ import { chatQaPrivateEvidenceHeaders } from './chatQa/http.js';
 import { createEventsRouter } from './routes/events.js';
 import { createQaPoliciesRouter } from './routes/qa-policies.js';
 import { createQaAutomationRouter } from './routes/qa-automation.js';
-import { runQaAutomationCycle } from './jobs/qaAutomationCycle.js';
+import { runQaDailyCycle } from './qaAutomation/dailyRuntime.js';
 import { createCallsDirectorySyncer } from './callsDirectory/runtime.js';
 import { searchConfluence } from './confluence.js';
 import { createComplaintsRuntime } from './complaints/runtime.js';
@@ -81,13 +81,12 @@ const callsDirectory = createCallsDirectorySyncer(db, process.env);
 export const chatQaRuntime = new ChatQaRuntime({
     db,
     env: process.env,
-    automationCycle: async (signal, syncCatalog) => {
-        await runQaAutomationCycle({
+    automationCycle: async (signal, _syncCatalog, delivery) => {
+        await runQaDailyCycle({
             db,
             chatSource: () => chatQaRuntime.getOrConnectSource(),
-            chatSourceEnabled: chatQaRuntime.getStatus().enabled,
-            callCycle: (callSignal, assignEnabled, syncCalls) => callQaRuntime.automation.run(callSignal, assignEnabled, syncCalls),
-            syncCatalog,
+            callCycle: (callSignal, assignEnabled, syncCalls, reviewDate, deliveryDate) => callQaRuntime.automation.run(callSignal, assignEnabled, syncCalls, reviewDate, deliveryDate),
+            delivery,
             signal,
             syncDirectory: (directorySignal) => callsDirectory.sync({ signal: directorySignal }),
         });

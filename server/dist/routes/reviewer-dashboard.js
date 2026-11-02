@@ -1,12 +1,20 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { invalid, parseQuery, requireChatQaRole } from '../chatQa/http.js';
+import { reviewerMetrics } from '../qaAutomation/reviewerMetrics.js';
+import { bakuMonth } from '../qaAutomation/types.js';
 const querySchema = z
-    .object({ period: z.enum(['today', '7d', '30d', '90d']).default('30d') })
+    .object({
+    period: z.enum(['today', '7d', '30d', '90d']).default('30d'),
+    month: z
+        .string()
+        .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
+        .optional(),
+})
     .strict();
 const DAY = 86_400_000;
 const BAKU_OFFSET = 4 * 3_600_000;
-export function reviewerDashboard(db, reviewerId, period, now) {
+export function reviewerDashboard(db, reviewerId, period, now, contactMonth = bakuMonth(now.getTime())) {
     const days = period === 'today' ? 1 : Number.parseInt(period, 10);
     const to = now.getTime();
     const from = Math.floor((to + BAKU_OFFSET) / DAY) * DAY - BAKU_OFFSET - (days - 1) * DAY;
@@ -103,7 +111,18 @@ export function reviewerDashboard(db, reviewerId, period, now) {
         };
     });
     const timedReviews = rows.reduce((sum, row) => sum + row.timed, 0);
+    const contacts = reviewerMetrics(db, reviewerId, now.getTime(), contactMonth);
     return {
+        contactMonth: {
+            month: contactMonth,
+            assigned: contacts.contact_month_total,
+            completed: contacts.contact_month_completed,
+            chat: contacts.contact_month_chat_completed,
+            call: contacts.contact_month_call_completed,
+            other: contacts.contact_month_other_completed,
+            unknownOpen: contacts.unknown_contact_date_open,
+            unknownCompleted: contacts.unknown_contact_date_completed,
+        },
         period: { key: period, timezone: 'Asia/Baku', from: params.fromIso, to: params.toIso },
         totals: {
             completed: byChannel[0].completed + byChannel[1].completed,
@@ -126,7 +145,7 @@ export function createReviewerDashboardRouter(options) {
         const query = parseQuery(querySchema, req);
         if (!query)
             return invalid(res);
-        res.json(reviewerDashboard(options.db, req.user.id, query.period, options.clock?.() ?? new Date()));
+        res.json(reviewerDashboard(options.db, req.user.id, query.period, options.clock?.() ?? new Date(), query.month));
     });
     return router;
 }

@@ -1,10 +1,11 @@
-import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { bakuReviewDay, previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { enqueueManualChatSync } from './manualSync.js';
 import { syncChatCatalog } from './sync.js';
+import { safeSourceDiagnostic } from './sourceDiagnostics.js';
 /** HTTP catalog work is resumed by durable chunks; assignment waits for the full day. */
 export async function syncPreviousDay(input) {
     const now = input.clock();
-    const day = previousBakuDay(now);
+    const day = input.reviewDate ? bakuReviewDay(input.reviewDate) : previousBakuDay(now);
     if (input.source.maxSyncWindowMs !== undefined && !input.sync) {
         const complete = input.db
             .prepare(`SELECT 1 FROM chat_source_sync_operations
@@ -21,6 +22,7 @@ export async function syncPreviousDay(input) {
                 dryRun: false,
                 actorUserId: 'system:daily',
                 now: now.getTime(),
+                reviewDate: input.reviewDate,
             });
         return { status: null, queued: true };
     }
@@ -36,5 +38,13 @@ export async function syncPreviousDay(input) {
         signal: input.signal,
         window: { start: new Date(day.start), end: new Date(day.end) },
     });
-    return { status: result.status, queued: false };
+    return {
+        status: result.status,
+        queued: false,
+        ...(result.status === 'succeeded'
+            ? {}
+            : {
+                errorCode: safeSourceDiagnostic('errorCode' in result ? result.errorCode : 'source_catalog_failed'),
+            }),
+    };
 }

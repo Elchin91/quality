@@ -1,13 +1,14 @@
 import { bakuMonth, bakuMonthBounds } from '../qaAutomation/types.js';
-import { listReviewerReadiness, monthlyAssignments, } from './repository.js';
+import { listReviewerReadiness, monthlyAssignmentsForMonth, } from './repository.js';
+import { taskContactDate } from '../contactPeriod.js';
 export const REBALANCE_REASON = 'Rebalanced to an available reviewer';
 export const REPAIR_REASON = 'Restored automatic reviewer assignment';
-export function balanceState(db, now) {
+export function balanceState(db, now, month = bakuMonth(now)) {
     const reviewers = listReviewerReadiness(db, 0);
     return {
         reviewers,
-        monthly: monthlyAssignments(db, reviewers.map((row) => row.userId), now),
-        ...bakuMonthBounds(bakuMonth(now)),
+        monthly: monthlyAssignmentsForMonth(db, reviewers.map((row) => row.userId), month),
+        ...bakuMonthBounds(month),
     };
 }
 /** Strict lexicographic improvement prevents monthly/open balancing from undoing each other. */
@@ -38,6 +39,9 @@ export function transferAllowed(state, donorId, receiverId, group, createdAt) {
 export function assertTransferAllowed(db, input) {
     if (!db.inTransaction)
         throw new Error('rebalance requires an active transaction');
-    if (!transferAllowed(balanceState(db, input.now), input.donor, input.receiver, input.group, input.createdAt))
+    const contact = taskContactDate(db, input.channel, input.taskId);
+    if (!contact)
+        throw new Error('rebalance_contact_date_unknown');
+    if (!transferAllowed(balanceState(db, input.now, contact.slice(0, 7)), input.donor, input.receiver, input.group, Date.parse(`${contact}T00:00:00+04:00`)))
         throw new Error('rebalance_state_conflict');
 }

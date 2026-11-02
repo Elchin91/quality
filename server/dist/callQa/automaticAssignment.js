@@ -1,9 +1,10 @@
+import { deliveryItemExists, recordDeliveryItem } from '../qaAutomation/dailyRepository.js';
 import { ordinarySourcePredicate } from '../qaPurpose.js';
 import { directoryGroupOf, expectedCallDirection } from '../callsDirectory/groups.js';
 import { isUnusable } from '../qaUnusable/unusable.js';
 import { callTaskDeadline } from './policy.js';
 import { nanoid } from 'nanoid';
-import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
+import { bakuReviewDay, previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { operatorChannelCapacity, operatorMonthlyCapacity, quotaFor, } from '../qaAutomation/quota.js';
 import { assignmentExplanation, configuredDefaultCapacity, selectReviewerAndAdvance, } from '../reviewerAssignment/repository.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
@@ -107,7 +108,15 @@ function toTask(row) {
 }
 /** Call after recording preparation; all mutable decisions are repeated under BEGIN IMMEDIATE. */
 export function assignAutomaticCallQaTask(input) {
-    const values = captureRuntimeInput(input, ['db', 'sourceRecordId'], ['clock', 'createId', 'randomIndex', 'enforceRosterQuota', 'signal'], invalid);
+    const values = captureRuntimeInput(input, ['db', 'sourceRecordId'], [
+        'clock',
+        'createId',
+        'randomIndex',
+        'enforceRosterQuota',
+        'signal',
+        'reviewDate',
+        'deliveryDate',
+    ], invalid);
     const db = requireDatabase(values.db, invalid);
     const sourceRecordId = requireIdentifier(values.sourceRecordId, invalid);
     const clock = values.clock;
@@ -121,6 +130,12 @@ export function assignAutomaticCallQaTask(input) {
         (signal !== undefined && !(signal instanceof AbortSignal)) ||
         typeof enforceRosterQuota !== 'boolean')
         return invalid();
+    const reviewDate = values.reviewDate;
+    const deliveryDate = values.deliveryDate;
+    if (reviewDate)
+        bakuReviewDay(reviewDate);
+    if (deliveryDate)
+        bakuReviewDay(deliveryDate);
     const now = currentTime(clock);
     if (signal?.aborted)
         fail('task_state_conflict');
@@ -131,6 +146,8 @@ export function assignAutomaticCallQaTask(input) {
             .transaction(() => {
             if (signal?.aborted)
                 fail('task_state_conflict');
+            if (deliveryItemExists(db, deliveryDate, 'call', sourceRecordId))
+                fail('duplicate_task');
             const source = eligibleSource(db, sourceRecordId);
             if (!db
                 .prepare(`SELECT 1 FROM call_source_records WHERE id=? AND ${ordinarySourcePredicate(db, 'call_source_records')}`)
@@ -147,7 +164,7 @@ export function assignAutomaticCallQaTask(input) {
                 fail('duplicate_task');
             if (isUnusable(db, 'call', source.id))
                 fail('source_ineligible');
-            if (enforceRosterQuota && source.baku_date !== previousBakuDay(now.ms).date)
+            if (enforceRosterQuota && source.baku_date !== (reviewDate ?? previousBakuDay(now.ms).date))
                 fail('source_ineligible');
             const recordTime = Date.parse(source.call_started_at_utc);
             if (operatorMonthlyCapacity(db, source.agent_id, recordTime).remaining === 0)
@@ -156,7 +173,7 @@ export function assignAutomaticCallQaTask(input) {
                 fail('quota_unavailable');
             if (enforceRosterQuota) {
                 try {
-                    const quota = quotaFor(db, source.agent_id, now.ms, 'call');
+                    const quota = quotaFor(db, source.agent_id, now.ms, 'call', reviewDate);
                     if (!quota.allowed)
                         fail('quota_unavailable');
                 }
@@ -169,6 +186,7 @@ export function assignAutomaticCallQaTask(input) {
                 reviewer = selectReviewerAndAdvance(db, {
                     defaultCapacity: configuredDefaultCapacity(db),
                     now: now.ms,
+                    contactMonth: source.baku_date.slice(0, 7),
                     randomIndex,
                     group: directoryGroupOf(db, source.agent_id) === 'telesales'
                         ? 'telesales'
@@ -199,6 +217,7 @@ export function assignAutomaticCallQaTask(input) {
                 effective_capacity: reviewer.effectiveCapacity,
                 selection: 'least_load_random',
             }), now.iso));
+            recordDeliveryItem(db, deliveryDate, 'call', source.id, taskId);
             publishCallQaChange(db, taskId, 'qa_task.assigned', now.ms);
             if (db
                 .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications'")

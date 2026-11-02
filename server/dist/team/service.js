@@ -44,6 +44,12 @@ function teamRows(db, userId, filters) {
 }
 export function teamDashboard(db, userId, filters) {
     const members = teamAgents(db, userId);
+    const unknownWhere = teamWhere(userId, { ...filters, from: undefined, to: undefined });
+    const unknownCount = Number(db
+        .prepare(`SELECT COUNT(*) FROM evaluations e WHERE ${unknownWhere.sql}
+    AND ${businessDateSql()} IS NULL`)
+        .pluck()
+        .get(...unknownWhere.args));
     // Keep the group comparison intact when drilling into one operator's totals/history.
     const memberRows = teamRows(db, userId, { ...filters, agent_id: undefined });
     const rows = filters.agent_id
@@ -60,8 +66,10 @@ export function teamDashboard(db, userId, filters) {
     const criteria = new Map();
     const appeals = new Map();
     for (const row of rows) {
-        const date = String(row.business_date);
-        daily.set(date, [...(daily.get(date) ?? []), row]);
+        if (typeof row.business_date === 'string') {
+            const date = row.business_date;
+            daily.set(date, [...(daily.get(date) ?? []), row]);
+        }
         const decoded = decodeAgentEvaluation(row);
         if (typeof row.appeal_status === 'string')
             appeals.set(row.appeal_status, (appeals.get(row.appeal_status) ?? 0) + 1);
@@ -74,6 +82,7 @@ export function teamDashboard(db, userId, filters) {
         appeals: [...appeals].map(([status, count]) => ({ status, count })),
         totals: {
             ...aggregate(rows),
+            unknown_contact_date_count: unknownCount,
             agents: members.length,
             scored_agents: new Set(rows.map((row) => row.agent_id)).size,
         },

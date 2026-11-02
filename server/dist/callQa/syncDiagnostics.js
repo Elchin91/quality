@@ -16,7 +16,7 @@ export function callSyncFailureCode(error, fallback = 'source_catalog_failed') {
     const code = Object.getOwnPropertyDescriptor(error, 'code')?.value;
     if (error instanceof SourceDiagnosticError &&
         typeof code === 'string' &&
-        Object.hasOwn(SOURCE_DIAGNOSTICS, code))
+        Object.prototype.hasOwnProperty.call(SOURCE_DIAGNOSTICS, code))
         return code;
     if (['ETIMEDOUT', 'PROTOCOL_SEQUENCE_TIMEOUT', 'ETIME', 50].includes(code))
         return 'source_query_timeout';
