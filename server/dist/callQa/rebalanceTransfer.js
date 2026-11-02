@@ -1,6 +1,6 @@
 import { nanoid } from 'nanoid';
 import { assertTransferAllowed, REBALANCE_REASON, REPAIR_REASON, } from '../reviewerAssignment/balance.js';
-import { legacyRebalanceCandidate } from '../reviewerAssignment/legacyRebalance.js';
+import { confirmedLegacyRebalanceCandidate, legacyRebalanceCandidate, } from '../reviewerAssignment/legacyRebalance.js';
 import { reviewerReadiness } from '../reviewerAssignment/repository.js';
 import { withCallQaSystemAuthorization } from './automaticSchema.js';
 import { CallQaServiceError } from './errors.js';
@@ -14,7 +14,7 @@ function invalid() {
 }
 /** Keeps the old immutable task and its audit; both cancellation and replacement commit together. */
 export function transferAutomaticCallTask(input) {
-    const values = captureRuntimeInput(input, ['db', 'taskId', 'expectedVersion', 'reviewerUserId', 'actorUserId'], ['clock', 'createId', 'repairRootTaskId'], invalid);
+    const values = captureRuntimeInput(input, ['db', 'taskId', 'expectedVersion', 'reviewerUserId', 'actorUserId'], ['clock', 'createId', 'repairRootTaskId', 'repairConfirmed'], invalid);
     const db = requireDatabase(values.db, invalid);
     const taskId = requireIdentifier(values.taskId, invalid);
     const reviewerUserId = requireIdentifier(values.reviewerUserId, invalid);
@@ -24,7 +24,9 @@ export function transferAutomaticCallTask(input) {
         ? null
         : requireIdentifier(values.repairRootTaskId, invalid);
     if ((values.clock !== undefined && typeof values.clock !== 'function') ||
-        (values.createId !== undefined && typeof values.createId !== 'function'))
+        (values.createId !== undefined && typeof values.createId !== 'function') ||
+        (values.repairConfirmed !== undefined && typeof values.repairConfirmed !== 'boolean') ||
+        (values.repairConfirmed === true && repairRoot === null))
         invalid();
     const date = values.clock?.() ?? new Date();
     if (!(date instanceof Date) || !Number.isSafeInteger(date.getTime()) || date.getTime() < 0)
@@ -52,7 +54,9 @@ export function transferAutomaticCallTask(input) {
             conflict();
         let createdAt = current.created_at_utc;
         if (repairRoot) {
-            const candidate = legacyRebalanceCandidate(db, taskId);
+            const candidate = values.repairConfirmed === true
+                ? confirmedLegacyRebalanceCandidate(db, taskId)
+                : legacyRebalanceCandidate(db, taskId);
             if (!candidate ||
                 candidate.originalTaskId !== repairRoot ||
                 reviewerUserId !== current.reviewer_user_id)

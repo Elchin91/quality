@@ -49,3 +49,27 @@ export function legacyRebalanceCandidates(db) {
         return candidate ? [candidate] : [];
     });
 }
+/** Conservative subset for an explicitly requested repair run; unequal timestamps remain review-only. */
+export function confirmedLegacyRebalanceCandidate(db, taskId) {
+    const candidate = legacyRebalanceCandidate(db, taskId);
+    if (!candidate)
+        return null;
+    const confirmed = db
+        .prepare(`SELECT 1 FROM call_qa_tasks current
+    JOIN call_qa_tasks previous ON previous.id=?
+    WHERE current.id=? AND current.assigned_at_utc=previous.cancelled_at_utc
+      AND current.created_at_utc=current.assigned_at_utc
+      AND current.deadline_at_utc IS previous.deadline_at_utc
+      AND current.source_record_id=previous.source_record_id
+      AND current.agent_id IS previous.agent_id AND current.scorecard_kind=previous.scorecard_kind
+      AND EXISTS(SELECT 1 FROM call_qa_events original WHERE original.task_id=previous.id
+        AND original.event_type='assigned' AND original.actor_role='system'
+        AND original.actor_user_id IS NULL AND original.created_at_utc=previous.assigned_at_utc)
+      AND NOT EXISTS(SELECT 1 FROM call_qa_events other
+        WHERE other.source_record_id=current.source_record_id
+          AND other.created_at_utc=current.assigned_at_utc
+          AND NOT ((other.task_id=previous.id AND other.event_type='cancelled') OR
+                   (other.task_id=current.id AND other.event_type='assigned')))`)
+        .get(candidate.originalTaskId, candidate.taskId);
+    return confirmed ? candidate : null;
+}

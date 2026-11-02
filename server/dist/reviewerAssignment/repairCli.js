@@ -4,8 +4,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { registerCallQaRuntimeFunctions } from '../callQa/schema.js';
 import { transferAutomaticCallTask } from '../callQa/rebalanceTransfer.js';
-import { legacyRebalanceCandidates } from './legacyRebalance.js';
-const USAGE = 'node server/dist/reviewerAssignment/repairCli.js --db existing-data.db [--dry-run | --apply --verified-task-ids reviewed-ids.json --backup new-backup.db]';
+import { confirmedLegacyRebalanceCandidate, legacyRebalanceCandidates, } from './legacyRebalance.js';
+import { REBALANCE_REASON } from './balance.js';
+const USAGE = 'node server/dist/reviewerAssignment/repairCli.js --db existing-data.db [--dry-run | --apply --verified-task-ids reviewed-ids.json --backup new-backup.db | --repair-confirmed --backup new-backup.db]';
 const ID = /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,199}$/u;
 function options(argv) {
     let database = '', ids = '', backup = '', mode;
@@ -21,12 +22,15 @@ function options(argv) {
             mode = 'apply';
         else if (argument === '--dry-run' && !mode)
             mode = 'dry-run';
+        else if (argument === '--repair-confirmed' && !mode)
+            mode = 'repair-confirmed';
         else
             throw new Error(USAGE);
     }
     mode ??= 'dry-run';
     if (!database ||
         (mode === 'apply' && (!ids || !backup)) ||
+        (mode === 'repair-confirmed' && (!backup || ids)) ||
         (mode === 'dry-run' && (ids || backup)))
         throw new Error(USAGE);
     return {
@@ -90,7 +94,20 @@ export async function runRebalanceRepairCli(argv) {
                 eligible_admin_ids: actors.map(({ id }) => id),
                 note: 'Review audit evidence before explicitly allowlisting task IDs. No records changed.',
             };
-        const ids = verifiedIds(input.ids);
+        const confirmed = input.mode === 'repair-confirmed';
+        const ids = confirmed
+            ? candidates
+                .filter((candidate) => confirmedLegacyRebalanceCandidate(db, candidate.taskId))
+                .slice(0, 500)
+                .map((candidate) => candidate.taskId)
+            : verifiedIds(input.ids);
+        const skippedCount = confirmed
+            ? db
+                .prepare(`SELECT COUNT(*) FROM call_qa_tasks WHERE status='assigned' AND purpose='regular'
+          AND assignment_origin='manual' AND assignment_reason=?`)
+                .pluck()
+                .get(REBALANCE_REASON) - ids.length
+            : 0;
         const byId = new Map(candidates.map((candidate) => [candidate.taskId, candidate]));
         const pending = [];
         const alreadyRepaired = [];
@@ -108,7 +125,13 @@ export async function runRebalanceRepairCli(argv) {
                 throw new Error(`task_not_eligible_for_repair:${id}`);
         }
         if (!pending.length)
-            return { mode: input.mode, repaired: [], already_repaired: alreadyRepaired, failed: [] };
+            return {
+                mode: input.mode,
+                repaired: [],
+                already_repaired: alreadyRepaired,
+                failed: [],
+                skipped_count: skippedCount,
+            };
         if (!actors.length)
             throw new Error('no_admin_actor');
         const guard = db
@@ -129,6 +152,7 @@ export async function runRebalanceRepairCli(argv) {
                     reviewerUserId: candidate.reviewerUserId,
                     actorUserId: actors[0].id,
                     repairRootTaskId: candidate.originalTaskId,
+                    repairConfirmed: confirmed,
                 });
                 repaired.push({ previous_task_id: candidate.taskId, replacement_task_id: replacement });
             }
@@ -144,6 +168,7 @@ export async function runRebalanceRepairCli(argv) {
             repaired,
             already_repaired: alreadyRepaired,
             failed,
+            skipped_count: skippedCount,
         };
     }
     finally {
