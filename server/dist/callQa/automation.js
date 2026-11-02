@@ -10,6 +10,7 @@ import { CallQaServiceError } from './errors.js';
 import { appendCallQaOperationalEvent } from './operationalEvents.js';
 import { captureContactContext } from '../contactContext/context.js';
 import { syncCallCatalog } from './sync.js';
+import { callSyncError, callSyncFailureCode } from './syncDiagnostics.js';
 const MAX_ASSIGNMENTS_PER_CYCLE = 32;
 const MAX_CANDIDATES_PER_CYCLE = 500;
 const MAX_PREPARATIONS_PER_CYCLE = 64;
@@ -88,12 +89,12 @@ export async function prepareSelectedCallRecording(dependencies, input) {
     }
 }
 async function syncPreviousDay(dependencies, signal) {
-    if (!dependencies.source || !dependencies.normalizationProtection)
-        throw new Error('call qa source unavailable');
     const now = nowFrom(dependencies.clock);
     const day = previousBakuDay(now);
     const correlationId = nanoid(24);
     try {
+        if (!dependencies.source || !dependencies.normalizationProtection)
+            throw new Error('call qa source unavailable');
         const result = await syncCallCatalog({
             db: dependencies.db,
             source: dependencies.source,
@@ -125,10 +126,10 @@ async function syncPreviousDay(dependencies, signal) {
                 eventType: 'sync_failed',
                 batchSubject: 'catalog_sync',
                 correlationId,
-                code: 'source_unavailable',
+                code: callSyncFailureCode(error),
                 now: now.toISOString(),
             });
-        throw error;
+        throw callSyncError(error);
     }
 }
 function candidateSourceIds(dependencies) {

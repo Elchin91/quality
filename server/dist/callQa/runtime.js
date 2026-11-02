@@ -1,5 +1,6 @@
 import { getCallQaReviewSource, rejectCallQaAiDraft, saveCallQaTranscriptCorrections, } from './aiDraft.js';
 import { createCallQaAutomation } from './automation.js';
+import { createAdminCallSync } from './adminSync.js';
 import { refineCallQaTask } from './refinement.js';
 import path from 'node:path';
 import { createSecretKey } from 'node:crypto';
@@ -22,7 +23,6 @@ import { getReviewerCallQaTask, listReviewerCallQaTasks } from './queries.js';
 import { createComplaintCallDiscovery } from '../complaints/callSource.js';
 import { assignCallQaTask, CallQaServiceError, cancelCallQaTask, completeCallQaTask, generateCallQaAiDraft, startCallQaTask, } from './service.js';
 import { callSourceConfigFromChatSource } from './sourceConfig.js';
-import { syncCallCatalog } from './sync.js';
 function loadState(options) {
     let recordingConfig = null;
     try {
@@ -104,11 +104,6 @@ function locator(value) {
     if (value.startsWith('omnichannel:'))
         return { kind: 'omnichannel_id', value };
     throw new CallQaServiceError('recording_not_ready', 409);
-}
-function bakuWindow(from, to) {
-    const start = new Date(`${from}T00:00:00+04:00`);
-    const end = new Date(new Date(`${to}T00:00:00+04:00`).getTime() + 86_400_000);
-    return { start, end };
 }
 function taskSource(db, taskId, reviewerUserId) {
     const row = db
@@ -200,45 +195,12 @@ export function createCallQaRuntime(options) {
             requireAdmin(options.db, actorUserId);
             return status();
         },
-        sync: async ({ actorUserId, from, to, pageSize, signal, correlationId }) => {
-            requireAdmin(options.db, actorUserId);
-            try {
-                if (!source || !state.normalizationProtection)
-                    return serviceUnavailable('source_unavailable');
-                const result = await syncCallCatalog({
-                    db: options.db,
-                    source,
-                    normalizationProtection: state.normalizationProtection,
-                    window: bakuWindow(from, to),
-                    bakuDateFrom: from,
-                    bakuDateTo: to,
-                    pageSize,
-                    signal,
-                    clock: () => new Date(),
-                });
-                appendCallQaOperationalEvent({
-                    db: options.db,
-                    actorUserId,
-                    actorRole: 'admin',
-                    eventType: 'sync_succeeded',
-                    batchSubject: 'catalog_sync',
-                    correlationId,
-                });
-                return result;
-            }
-            catch (error) {
-                appendCallQaOperationalEvent({
-                    db: options.db,
-                    actorUserId,
-                    actorRole: 'admin',
-                    eventType: 'sync_failed',
-                    batchSubject: 'catalog_sync',
-                    correlationId,
-                    code: 'source_unavailable',
-                });
-                throw error;
-            }
-        },
+        sync: createAdminCallSync({
+            db: options.db,
+            source,
+            normalizationProtection: state.normalizationProtection,
+            authorize: (actorUserId) => requireAdmin(options.db, actorUserId),
+        }),
         listSources: async ({ actorUserId, ...query }) => {
             requireAdmin(options.db, actorUserId);
             return listCallCatalog(options.db, query);

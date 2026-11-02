@@ -1,4 +1,5 @@
 import { types as nodeTypes } from 'node:util';
+import { callSyncError } from './syncDiagnostics.js';
 import { isCallSourceNormalizationProtection, normalizeCallSourceRecord } from './normalize.js';
 import { CALL_SOURCE_MAX_PAGE_SIZE, CALL_SOURCE_MAX_WINDOW_DAYS, } from './sourceConfig.js';
 const DAY_MS = 86_400_000;
@@ -248,8 +249,8 @@ export class ProjectedCallSourceClient {
                 signal: request.signal ?? new AbortController().signal,
             });
         }
-        catch {
-            throw new Error('call source read failed');
+        catch (error) {
+            throw callSyncError(error, 'source_catalog_failed', 'read');
         }
         let snapshot;
         try {

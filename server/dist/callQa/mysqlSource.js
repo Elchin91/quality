@@ -6,6 +6,8 @@ import { assertLaptopVpnRoute, LAPTOP_VPN_SOURCE_HOST, monitorLaptopVpnRoute, } 
 import { CALL_SOURCE_MAX_PAGE_SIZE, CALL_SOURCE_MAX_WINDOW_DAYS, } from './sourceConfig.js';
 import { CALL_SOURCE_PROJECTION, } from './sourceClient.js';
 import { isObservedOmnichannelId } from './sourceTypes.js';
+import { SourceDiagnosticError } from '../chatQa/sourceDiagnostics.js';
+import { callSyncError } from './syncDiagnostics.js';
 const TIMEOUT_MS = 10_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DATE_KEY = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u;
@@ -197,15 +199,18 @@ export function createMysqlCallSourceAdapter(config) {
             connection?.destroy();
             connection = null;
         };
-        const abort = () => {
+        const abort = (code = 'source_connection_failed') => {
             cancelled = true;
             destroy();
-            rejectCancellation(new Error('call source operation failed'));
+            rejectCancellation(new SourceDiagnosticError(code));
         };
-        const timer = setTimeout(abort, TIMEOUT_MS);
+        const signalAborted = () => abort();
+        const timer = setTimeout(() => abort('source_query_timeout'), TIMEOUT_MS);
         timer.unref?.();
-        const stopRouteMonitor = config.laptopVpn ? monitorLaptopVpnRoute(abort) : () => undefined;
-        signal.addEventListener('abort', abort, { once: true });
+        const stopRouteMonitor = config.laptopVpn
+            ? monitorLaptopVpnRoute(() => abort('source_route_unavailable'))
+            : () => undefined;
+        signal.addEventListener('abort', signalAborted, { once: true });
         try {
             const work = (async () => {
                 const opened = await mysql.createConnection({
@@ -235,7 +240,7 @@ export function createMysqlCallSourceAdapter(config) {
         finally {
             clearTimeout(timer);
             stopRouteMonitor();
-            signal.removeEventListener('abort', abort);
+            signal.removeEventListener('abort', signalAborted);
             destroy();
         }
     }
@@ -314,8 +319,8 @@ export function createMysqlCallSourceAdapter(config) {
                     };
                 });
             }
-            catch {
-                throw new Error('call source read failed');
+            catch (error) {
+                throw callSyncError(error, 'source_catalog_failed', 'read');
             }
         },
     });

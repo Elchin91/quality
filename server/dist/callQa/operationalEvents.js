@@ -1,5 +1,6 @@
 import { nanoid } from 'nanoid';
 import { withCallQaSystemAuthorization } from './automaticSchema.js';
+import { CALL_SYNC_FAILURE_CODES } from './syncDiagnostics.js';
 const TOKEN = /^[A-Za-z0-9_-]{16,128}$/u;
 const ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
@@ -37,6 +38,13 @@ export function appendCallQaOperationalEvent(input) {
     const failed = FAILURE.test(input.eventType);
     if (failed !== (input.code !== undefined))
         return invalid();
+    if (input.code !== undefined) {
+        const allowed = input.eventType === 'sync_failed'
+            ? CALL_SYNC_FAILURE_CODES
+            : ['source_unavailable', 'recording_failed', 'transcript_unavailable', 'ai_failed'];
+        if (!allowed.includes(input.code))
+            return invalid();
+    }
     const metadata = {};
     if (input.batchSubject)
         metadata.subject = input.batchSubject;

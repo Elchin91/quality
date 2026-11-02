@@ -1,3 +1,5 @@
+import { safeCallSyncFailureCode } from '../callQa/syncDiagnostics.js';
+import { reviewerMetrics } from '../qaAutomation/reviewerMetrics.js';
 import { Router } from 'express';
 import { unusableSql } from '../qaUnusable/unusable.js';
 import { lastRebalance } from '../reviewerAssignment/rebalance.js';
@@ -10,7 +12,7 @@ import { DurableJobRepository } from '../jobs/repository.js';
 import { refreshCurrentRoster, rosterErrorCode } from '../qaAutomation/googleSheets.js';
 import { listRosterQuota, quotaFor } from '../qaAutomation/quota.js';
 import { confirmRosterLink, getAutomationEnabled, readRosterSnapshot, removeRosterLink, saveRosterCsv, setAutomationEnabled, } from '../qaAutomation/repository.js';
-import { bakuMonth, UPLOADED_ROSTER_GID } from '../qaAutomation/types.js';
+import { bakuMonth, bakuMonthBounds, UPLOADED_ROSTER_GID } from '../qaAutomation/types.js';
 import { previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { listReviewerReadiness, monthlyAssignments } from '../reviewerAssignment/repository.js';
 import { SOURCE_DIAGNOSTICS } from '../chatQa/sourceDiagnostics.js';
@@ -45,10 +47,18 @@ function lastChannelSync(db) {
         .get();
     const call = hasCallEvents
         ? db
-            .prepare(`SELECT event_type,created_at_utc FROM call_qa_events
+            .prepare(`SELECT event_type,created_at_utc,metadata_json FROM call_qa_events
      WHERE event_type IN ('sync_succeeded','sync_failed') ORDER BY created_at_utc DESC,rowid DESC LIMIT 1`)
             .get()
         : undefined;
+    let callCode = 'source_unavailable';
+    try {
+        const code = JSON.parse(call?.metadata_json ?? '{}').code;
+        callCode = safeCallSyncFailureCode(code);
+    }
+    catch {
+        /* Legacy invalid metadata stays generic. */
+    }
     return {
         chat: chat
             ? {
@@ -67,7 +77,7 @@ function lastChannelSync(db) {
                 started_at: Date.parse(call.created_at_utc),
                 // Operational events store the cycle start, not its completion time.
                 completed_at: null,
-                error_code: call.event_type === 'sync_succeeded' ? null : 'source_unavailable',
+                error_code: call.event_type === 'sync_succeeded' ? null : callCode,
             }
             : null,
     };
@@ -82,6 +92,11 @@ function reviewerBoard(db, readiness, nowMs) {
             .pluck()
             .get(userId, status) ?? 0), 0);
     return {
+        period: {
+            month: bakuMonth(nowMs),
+            timezone: 'Asia/Baku',
+            ...bakuMonthBounds(bakuMonth(nowMs)),
+        },
         reviewers: readiness.map((row) => ({
             id: row.userId,
             name: names.get(row.userId) ?? row.userId,
@@ -91,6 +106,7 @@ function reviewerBoard(db, readiness, nowMs) {
             not_started: count('assigned', row.userId),
             in_progress: count('in_progress', row.userId),
             month_total: month.get(row.userId) ?? 0,
+            ...reviewerMetrics(db, row.userId, nowMs),
         })),
         last_rebalance: lastRebalance(db),
     };
@@ -161,6 +177,9 @@ export function createQaAutomationRouter(db, options = {}) {
                 .prepare(`SELECT status,error_code,started_at,completed_at FROM durable_jobs
            WHERE type='chat_scheduled_cycle' ORDER BY created_at DESC,id DESC LIMIT 1`)
                 .get();
+            const lastFullSyncJob = db
+                .prepare(`SELECT status,error_code,started_at,completed_at FROM durable_jobs WHERE type='chat_scheduled_cycle' AND COALESCE(json_extract(payload_json,'$.sync_catalog'),1)<>0 ORDER BY created_at DESC,id DESC LIMIT 1`)
+                .get();
             res.json({
                 enabled: getAutomationEnabled(db),
                 updated_at_ms: setting.updated_at_ms,
@@ -180,6 +199,7 @@ export function createQaAutomationRouter(db, options = {}) {
                 operators,
                 agent_choices: db.prepare('SELECT id,name FROM agents ORDER BY name,id').all(),
                 last_job: lastJob ?? null,
+                last_full_sync_job: lastFullSyncJob ?? null,
                 directory: lastDirectorySync(db),
                 last_channel_sync: lastChannelSync(db),
                 reviewer_board: reviewerBoard(db, reviewerReadiness, now),

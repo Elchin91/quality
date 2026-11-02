@@ -1,8 +1,8 @@
 import { regularTaskPredicate } from '../qaPurpose.js';
-import { assignCallQaTask, cancelCallQaTask } from '../callQa/service.js';
-import { reassignTask } from '../chatQa/taskLifecycle.js';
-import { listReviewerReadiness, REVIEWER_GROUPS } from './repository.js';
-const REASON = 'Rebalanced to an available reviewer';
+import { transferAutomaticCallTask } from '../callQa/rebalanceTransfer.js';
+import { rebalanceChatTask } from '../chatQa/taskLifecycle.js';
+import { balanceState, transferAllowed, transferImprovement, } from './balance.js';
+import { REVIEWER_GROUPS } from './repository.js';
 const MAX_MOVES = 500;
 function ensureStateTable(db) {
     db.exec(`CREATE TABLE IF NOT EXISTS reviewer_rebalance_state (
@@ -49,8 +49,9 @@ function movableTasks(db, group) {
     const tasks = [];
     if (group === 'customer_support' && tableExists(db, 'chat_qa_tasks'))
         tasks.push(...db
-            .prepare(`SELECT id,reviewer_user_id FROM chat_qa_tasks
+            .prepare(`SELECT id,reviewer_user_id,created_at,assigned_at FROM chat_qa_tasks
              WHERE status='assigned' AND assignment_origin='automatic' AND reviewer_user_id IS NOT NULL
+               AND started_at IS NULL AND evaluation_id IS NULL
                AND ${regularTaskPredicate(db, 'chat_qa_tasks')}
              ORDER BY assigned_at DESC,id DESC`)
             .all().map((row) => ({
@@ -60,12 +61,16 @@ function movableTasks(db, group) {
             sourceRecordId: null,
             version: null,
             deadlineAtUtc: null,
+            createdAt: row.created_at,
+            assignedAt: row.assigned_at,
+            group,
         })));
     if (tableExists(db, 'call_qa_tasks'))
         tasks.push(...db
-            .prepare(`SELECT id,reviewer_user_id,source_record_id,version,deadline_at_utc FROM call_qa_tasks
+            .prepare(`SELECT id,reviewer_user_id,source_record_id,version,deadline_at_utc,created_at_utc,assigned_at_utc FROM call_qa_tasks
              WHERE status='assigned' AND assignment_origin='automatic' AND reviewer_user_id IS NOT NULL
                AND ${regularTaskPredicate(db, 'call_qa_tasks')}
+               AND started_at_utc IS NULL AND evaluation_id IS NULL
                AND scorecard_kind ${group === 'telesales' ? "='telesales'" : "<>'telesales'"}
              ORDER BY assigned_at_utc DESC,id DESC`)
             .all().map((row) => ({
@@ -75,101 +80,92 @@ function movableTasks(db, group) {
             sourceRecordId: row.source_record_id,
             version: row.version,
             deadlineAtUtc: row.deadline_at_utc,
+            createdAt: Date.parse(row.created_at_utc),
+            assignedAt: Date.parse(row.assigned_at_utc),
+            group,
         })));
     return tasks;
 }
-function move(db, task, receiver, actorUserId, clock) {
-    if (task.channel === 'chat') {
-        reassignTask({
-            db,
-            taskId: task.id,
-            reviewerUserId: receiver,
-            actorUserId,
-            reason: REASON,
-            clock,
-        });
-        return true;
-    }
-    // A call task keeps its reviewer for life; the call itself is freed and assigned again.
-    cancelCallQaTask({
-        db,
-        taskId: task.id,
-        actorUserId,
-        reason: REASON,
-        expectedVersion: task.version,
-        clock,
-    });
-    for (const reviewerUserId of [receiver, task.reviewerUserId]) {
-        try {
-            assignCallQaTask({
-                db,
-                sourceRecordId: task.sourceRecordId,
-                reviewerUserId,
-                actorUserId,
-                reason: REASON,
-                deadlineAtUtc: task.deadlineAtUtc,
-                clock,
-            });
-            return reviewerUserId === receiver;
-        }
-        catch {
-            // Try the original reviewer; failing both, the freed call returns to the pool.
+function nextMove(state, tasks) {
+    const choices = [];
+    for (const group of REVIEWER_GROUPS) {
+        const ready = state.reviewers.filter((row) => row.ready && row.groups.includes(group));
+        for (const task of tasks.filter((row) => row.group === group)) {
+            const donor = state.reviewers.find((row) => row.userId === task.reviewerUserId);
+            const forced = !donor?.ready || !donor.groups.includes(group);
+            for (const receiver of ready) {
+                if (!transferAllowed(state, task.reviewerUserId, receiver.userId, group, task.createdAt))
+                    continue;
+                const improvement = transferImprovement(state, task.reviewerUserId, receiver.userId, task.createdAt);
+                choices.push({
+                    task,
+                    receiver: receiver.userId,
+                    rank: [
+                        forced ? 0 : 1,
+                        ...(forced ? [0, 0] : improvement),
+                        state.monthly.get(receiver.userId) ?? 0,
+                        receiver.openWorkload,
+                        -task.assignedAt,
+                    ],
+                });
+            }
         }
     }
-    return false;
+    return choices.sort((a, b) => {
+        for (let index = 0; index < a.rank.length; index++) {
+            const delta = a.rank[index] - b.rank[index];
+            if (delta)
+                return delta;
+        }
+        return a.task.id.localeCompare(b.task.id) || a.receiver.localeCompare(b.receiver);
+    })[0];
 }
-/**
- * Evens out unstarted automatic work inside each reviewer group: tasks held by reviewers who
- * are no longer ready move to ready ones, then the busiest give to the least busy until open
- * queues differ by at most one. Started and manually assigned tasks never move.
- */
+/** Rescue unavailable owners first; all other moves strictly improve monthly, then open, fairness. */
 export function rebalanceReviewerTasks(db, clock = () => new Date()) {
     const result = { moved: 0, failed: 0 };
+    const now = clock();
+    const nowMs = now.getTime();
+    if (!Number.isSafeInteger(nowMs) || nowMs < 0)
+        throw new RangeError('invalid rebalance clock');
     const actorUserId = rebalanceActor(db);
     if (!actorUserId) {
         result.skipped = 'no_admin_actor';
-        recordRebalance(db, result, clock().getTime());
+        recordRebalance(db, result, nowMs);
         return result;
     }
-    const readiness = listReviewerReadiness(db, 0);
-    for (const group of REVIEWER_GROUPS) {
-        const ready = readiness.filter((row) => row.ready && row.groups.includes(group));
-        if (!ready.length)
-            continue;
-        const readyIds = new Set(ready.map((row) => row.userId));
-        const open = new Map(readiness.map((row) => [row.userId, row.openWorkload]));
-        const pending = movableTasks(db, group);
-        const byReviewer = new Map();
-        for (const task of pending)
-            byReviewer.set(task.reviewerUserId, [...(byReviewer.get(task.reviewerUserId) ?? []), task]);
-        for (let moves = 0; moves < MAX_MOVES; moves += 1) {
-            const receiver = [...readyIds].sort((a, b) => (open.get(a) ?? 0) - (open.get(b) ?? 0) || a.localeCompare(b))[0];
-            const donors = [...byReviewer.entries()].filter(([id, tasks]) => tasks.length && id !== receiver);
-            const notReady = donors.find(([id]) => !readyIds.has(id));
-            const busiest = donors
-                .filter(([id]) => readyIds.has(id))
-                .sort(([a], [b]) => (open.get(b) ?? 0) - (open.get(a) ?? 0) || a.localeCompare(b))[0];
-            const donor = notReady ??
-                (busiest && (open.get(busiest[0]) ?? 0) - (open.get(receiver) ?? 0) > 1
-                    ? busiest
-                    : undefined);
-            if (!donor)
-                break;
-            const task = donor[1].shift();
-            try {
-                if (move(db, task, receiver, actorUserId, clock)) {
-                    result.moved += 1;
-                    open.set(donor[0], (open.get(donor[0]) ?? 1) - 1);
-                    open.set(receiver, (open.get(receiver) ?? 0) + 1);
-                }
-                else
-                    result.failed += 1;
-            }
-            catch {
-                result.failed += 1;
-            }
+    const failed = new Set();
+    for (let attempts = 0; attempts < MAX_MOVES; attempts++) {
+        // Both groups use current global counts, including all moves already committed in this pass.
+        const tasks = REVIEWER_GROUPS.flatMap((group) => movableTasks(db, group)).filter((row) => !failed.has(`${row.channel}:${row.id}`));
+        const choice = nextMove(balanceState(db, nowMs), tasks);
+        if (!choice)
+            break;
+        try {
+            if (choice.task.channel === 'chat')
+                rebalanceChatTask({
+                    db,
+                    taskId: choice.task.id,
+                    reviewerUserId: choice.receiver,
+                    actorUserId,
+                    expectedReviewerUserId: choice.task.reviewerUserId,
+                    clock: () => now,
+                });
+            else
+                transferAutomaticCallTask({
+                    db,
+                    taskId: choice.task.id,
+                    expectedVersion: choice.task.version,
+                    reviewerUserId: choice.receiver,
+                    actorUserId,
+                    clock: () => now,
+                });
+            result.moved++;
+        }
+        catch {
+            failed.add(`${choice.task.channel}:${choice.task.id}`);
+            result.failed++;
         }
     }
-    recordRebalance(db, result, clock().getTime());
+    recordRebalance(db, result, nowMs);
     return result;
 }

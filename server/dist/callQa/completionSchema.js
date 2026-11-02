@@ -1,4 +1,6 @@
 import { registerComplaintTaskAuthorization } from '../complaints/taskAuthorization.js';
+import { REBALANCE_REASON, REPAIR_REASON } from '../reviewerAssignment/balance.js';
+import { CALL_SYNC_FAILURE_CODES } from './syncDiagnostics.js';
 const completionAuthorization = new WeakSet();
 const registeredDatabases = new WeakSet();
 export function withCallQaCompletionAuthorization(db, work) {
@@ -161,8 +163,33 @@ export function createCallQaScorecardGuards(db, evaluationSchemaReady) {
          (json_type(NEW.metadata_json,'$.effective_capacity')='null' OR
           (json_type(NEW.metadata_json,'$.effective_capacity')='integer' AND
            json_extract(NEW.metadata_json,'$.effective_capacity')>0)) AND
-         json_extract(NEW.metadata_json,'$.selection')='least_load_random' AND
-         (SELECT COUNT(*) FROM json_each(NEW.metadata_json))=4 AND
+         ((json_extract(NEW.metadata_json,'$.selection')='least_load_random' AND
+           (SELECT COUNT(*) FROM json_each(NEW.metadata_json))=4) OR
+          (json_extract(NEW.metadata_json,'$.selection') IN ('rebalance','rebalance_repair') AND
+           (SELECT COUNT(*) FROM json_each(NEW.metadata_json))=6 AND tasks.purpose='regular' AND
+           json_type(NEW.metadata_json,'$.previous_task_id')='text' AND
+           json_type(NEW.metadata_json,'$.accounting_root_task_id')='text' AND
+           EXISTS(SELECT 1 FROM call_qa_tasks previous JOIN call_qa_tasks root
+             ON root.id=json_extract(NEW.metadata_json,'$.accounting_root_task_id')
+             WHERE previous.id=json_extract(NEW.metadata_json,'$.previous_task_id') AND
+               previous.id<>tasks.id AND previous.source_record_id=tasks.source_record_id AND
+               previous.agent_id IS tasks.agent_id AND previous.scorecard_kind=tasks.scorecard_kind AND
+               previous.deadline_at_utc IS tasks.deadline_at_utc AND previous.purpose='regular' AND
+               previous.status='cancelled' AND previous.started_at_utc IS NULL AND previous.evaluation_id IS NULL AND
+               root.source_record_id=tasks.source_record_id AND root.agent_id IS tasks.agent_id AND
+               root.scorecard_kind=tasks.scorecard_kind AND root.purpose='regular' AND
+               root.assignment_origin='automatic' AND root.status='cancelled' AND
+               tasks.created_at_utc=root.created_at_utc AND tasks.assigned_at_utc>=root.created_at_utc AND
+               ((json_extract(NEW.metadata_json,'$.selection')='rebalance' AND root.id=previous.id AND
+                 NEW.reason='${REBALANCE_REASON}') OR
+                (json_extract(NEW.metadata_json,'$.selection')='rebalance_repair' AND
+                 previous.assignment_origin='manual' AND previous.assignment_reason='${REBALANCE_REASON}' AND
+                 previous.reviewer_user_id=tasks.reviewer_user_id AND root.created_at_utc<=previous.created_at_utc AND
+                 NEW.reason='${REPAIR_REASON}')) AND
+               EXISTS(SELECT 1 FROM call_qa_events cancelled WHERE cancelled.task_id=previous.id AND
+                 cancelled.event_type='cancelled' AND cancelled.from_status='assigned' AND
+                 cancelled.to_status='cancelled' AND cancelled.actor_role='admin' AND
+                 cancelled.reason=NEW.reason AND cancelled.created_at_utc=NEW.created_at_utc)))) AND
          NEW.created_at_utc=tasks.assigned_at_utc AND NOT EXISTS(SELECT 1 FROM call_qa_events prior
            WHERE prior.task_id=NEW.task_id AND prior.event_type='assigned')) OR
         (NEW.event_type='started' AND NEW.metadata_json='{}' AND tasks.status='assigned' AND
@@ -213,8 +240,10 @@ export function createCallQaScorecardGuards(db, evaluationSchemaReady) {
           EXISTS(SELECT 1 FROM call_qa_tasks tasks WHERE tasks.id=NEW.task_id AND
             tasks.source_record_id=NEW.source_record_id AND tasks.reviewer_user_id=NEW.actor_user_id))) AND
         ((NEW.event_type GLOB '*_failed' AND json_type(NEW.metadata_json,'$.code')='text' AND
-          json_extract(NEW.metadata_json,'$.code') IN
-            ('source_unavailable','recording_failed','transcript_unavailable','ai_failed')) OR
+          ((NEW.event_type='sync_failed' AND json_extract(NEW.metadata_json,'$.code') IN
+             (${CALL_SYNC_FAILURE_CODES.map((code) => `'${code}'`).join(',')})) OR
+           (NEW.event_type<>'sync_failed' AND json_extract(NEW.metadata_json,'$.code') IN
+             ('source_unavailable','recording_failed','transcript_unavailable','ai_failed')))) OR
          (NEW.event_type GLOB '*_succeeded' AND json_type(NEW.metadata_json,'$.code') IS NULL))))
     BEGIN SELECT RAISE(ABORT,'invalid call qa event'); END;
 

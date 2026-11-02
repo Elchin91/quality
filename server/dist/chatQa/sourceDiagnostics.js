@@ -11,6 +11,7 @@ export const SOURCE_DIAGNOSTICS = {
     source_identity_conflict: 'Chat source request identities are inconsistent',
     source_query_timeout: 'Chat source query timed out',
     source_catalog_failed: 'Chat source catalog could not be loaded',
+    source_persistence_failed: 'Source catalog could not be saved',
 };
 export function safeSourceDiagnostic(code) {
     return typeof code === 'string' && Object.hasOwn(SOURCE_DIAGNOSTICS, code)

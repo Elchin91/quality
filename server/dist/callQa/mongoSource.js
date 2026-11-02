@@ -5,6 +5,8 @@ import { assertLaptopVpnRoute, assertLaptopVpnSourceEndpoints, monitorLaptopVpnR
 import { CALL_SOURCE_MAX_PAGE_SIZE, CALL_SOURCE_MAX_WINDOW_DAYS, } from './sourceConfig.js';
 import { CALL_SOURCE_PROJECTION, } from './sourceClient.js';
 import { isObservedOmnichannelId } from './sourceTypes.js';
+import { callSyncError } from './syncDiagnostics.js';
+import { SourceDiagnosticError } from '../chatQa/sourceDiagnostics.js';
 const TIMEOUT_MS = 10_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const CURSOR = /^call-report:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z):(\d{1,16})$/u;
@@ -76,21 +78,21 @@ function executeMysqlBounded(connection, sql, values, signal, destroy) {
             signal.removeEventListener('abort', abort);
             action();
         };
-        const failClosed = () => {
+        const failClosed = (code = 'source_connection_failed') => {
             destroy();
-            finish(() => reject(new Error('call source mysql operation failed')));
+            finish(() => reject(new SourceDiagnosticError(code)));
         };
         const abort = () => failClosed();
-        const timer = setTimeout(failClosed, TIMEOUT_MS);
+        const timer = setTimeout(() => failClosed('source_query_timeout'), TIMEOUT_MS);
         timer.unref?.();
         signal.addEventListener('abort', abort, { once: true });
         if (signal.aborted)
             return failClosed();
         try {
-            connection.execute({ sql, timeout: TIMEOUT_MS }, values).then((result) => finish(() => resolve(result)), () => finish(() => reject(new Error('call source mysql operation failed'))));
+            connection.execute({ sql, timeout: TIMEOUT_MS }, values).then((result) => finish(() => resolve(result)), (error) => finish(() => reject(callSyncError(error, 'source_catalog_failed', 'read'))));
         }
-        catch {
-            finish(() => reject(new Error('call source mysql operation failed')));
+        catch (error) {
+            finish(() => reject(callSyncError(error, 'source_catalog_failed', 'read')));
         }
     });
 }
@@ -358,8 +360,8 @@ export function createMongoCallSourceAdapter(config) {
                     nextCursor: reportRows.length === request.limit ? encodeCursor(last) : null,
                 };
             }
-            catch {
-                throw new Error('call source read failed');
+            catch (error) {
+                throw callSyncError(routeLost ? new SourceDiagnosticError('source_route_unavailable') : error, 'source_catalog_failed', 'read');
             }
             finally {
                 stopRouteMonitor();

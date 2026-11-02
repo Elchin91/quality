@@ -3,7 +3,6 @@ import { readRosterSnapshot, rosterIsFresh, saveRosterCsv } from './repository.j
 import { bakuMonth, bakuMonthBounds } from './types.js';
 import { previousBakuDay } from './reviewWindow.js';
 const SPREADSHEET_ID = '1Op_ql7ry7sL6-4_j_-byBzTTJ0PAE1vNDwTDBILwnXs';
-const OCTOBER_2026_GID = '1515823151';
 const DOCUMENT_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}`;
 export class RosterLoadError extends Error {
     code;
@@ -111,20 +110,41 @@ async function requestText(url, maximum, csv, fetcher, parent) {
         signal.removeEventListener('abort', onAbort);
     }
 }
-/** Google emits both direct gid links and escaped sheetId fields in its document page. */
-export function discoverSheetGids(html) {
+/** Read only scalar metadata from /htmlview; never evaluate Google's embedded scripts. */
+export function discoverSheetGids(html, month) {
     if (html.length > 3_000_000)
         throw new RosterLoadError('roster_response_too_large');
-    const ids = new Set();
-    const patterns = [
-        /\bgid=(\d{1,20})\b/gu,
-        /(?:\\?"sheetId\\?"|sheetId)\s*[:=]\s*\\?"?(\d{1,20})/gu,
-    ];
-    for (const pattern of patterns) {
-        for (const match of html.matchAll(pattern))
-            ids.add(match[1]);
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month))
+        throw new Error('invalid roster month');
+    const normalize = (title) => title
+        .normalize('NFKC')
+        .toLowerCase()
+        .replace(/[\s._-]+/gu, '');
+    const date = new Date(`${month}-01T12:00:00Z`);
+    const names = new Set([normalize(month)]);
+    for (const locale of ['ru', 'en', 'az']) {
+        const label = new Intl.DateTimeFormat(locale, { month: 'long', timeZone: 'UTC' }).format(date);
+        names.add(normalize(`${label}${month.slice(0, 4)}`));
     }
-    if (ids.size > 128)
+    const ids = new Set();
+    const descriptor = /\bitems\.push\(\{\s*name:\s*("(?:[^"\\]|\\.)*")\s*,\s*pageUrl:\s*"(?:[^"\\]|\\.)*"\s*,\s*gid:\s*"(\d{1,20})"\s*,/gu;
+    let count = 0;
+    for (const match of html.matchAll(descriptor)) {
+        if (++count > 128)
+            throw new RosterLoadError('roster_ambiguous');
+        let title;
+        try {
+            // Google also uses JavaScript hex escapes; convert those to JSON unicode escapes.
+            // Matching complete escape pairs preserves an escaped backslash before literal x.
+            title = JSON.parse(match[1].replace(/\\(?:x([\da-f]{2})|.)/giu, (escape, hex) => hex ? `\\u00${hex}` : escape));
+        }
+        catch {
+            throw new RosterLoadError('roster_response_invalid');
+        }
+        if (title.length <= 200 && names.has(normalize(title)))
+            ids.add(match[2]);
+    }
+    if (ids.size > 1)
         throw new RosterLoadError('roster_ambiguous');
     return [...ids];
 }
@@ -137,16 +157,16 @@ export async function fetchCurrentRosterCsv(input = {}) {
     const fetcher = input.fetcher ?? fetch;
     input.signal?.throwIfAborted();
     const candidates = new Set();
-    if (month === '2026-10')
-        candidates.add(OCTOBER_2026_GID);
+    if ((input.candidateGids?.length ?? 0) > 128)
+        throw new RosterLoadError('roster_ambiguous');
     for (const gid of input.candidateGids ?? []) {
         if (!/^\d{1,20}$/.test(gid))
             throw new Error('invalid Google schedule sheet ID');
         candidates.add(gid);
     }
-    if (!input.candidateGids?.length && month !== '2026-10') {
-        const html = await requestText(`${DOCUMENT_URL}/edit`, 3_000_000, false, fetcher, input.signal);
-        for (const gid of discoverSheetGids(html))
+    if (!input.candidateGids?.length) {
+        const html = await requestText(`${DOCUMENT_URL}/htmlview`, 3_000_000, false, fetcher, input.signal);
+        for (const gid of discoverSheetGids(html, month))
             candidates.add(gid);
     }
     if (!candidates.size)

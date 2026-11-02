@@ -1,6 +1,7 @@
 import { complaintTransactionAuthorized } from '../complaints/taskAuthorization.js';
 import { qaTaskPurpose } from '../qaPurpose.js';
 import { assignmentExplanation, reviewerReadiness } from '../reviewerAssignment/repository.js';
+import { assertTransferAllowed, REBALANCE_REASON } from '../reviewerAssignment/balance.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 import { enqueueQaRefill } from '../jobs/qaRefill.js';
 import { addBakuCalendarDays, boundedText, fail, insertEvent, invalidateRunningDraft, notify, nowFrom, ownedTask, policy, requireAdmin, resolveReviewerTaskNotifications, runImmediate, task, } from './serviceSupport.js';
@@ -22,10 +23,24 @@ export function startTask(input) {
     });
 }
 export function reassignTask(input) {
+    return performReassignment(input, false);
+}
+export function rebalanceChatTask(input) {
+    return performReassignment({ ...input, reason: REBALANCE_REASON }, true, input.expectedReviewerUserId);
+}
+function performReassignment(input, automatic, expectedReviewerUserId) {
     const reason = boundedText(input.reason, 2_000);
     return runImmediate(input.db, () => {
         requireAdmin(input.db, input.actorUserId);
         const current = task(input.db, input.taskId);
+        if (automatic &&
+            (current.status !== 'assigned' ||
+                current.started_at !== null ||
+                current.evaluation_id !== null ||
+                current.assignment_origin !== 'automatic' ||
+                current.reviewer_user_id !== expectedReviewerUserId ||
+                qaTaskPurpose(input.db, 'chat', current.id) !== 'regular'))
+            fail('task_state_conflict');
         // A complaint and its newly created QA work must move in one authorized handoff.
         if (qaTaskPurpose(input.db, 'chat', current.id) === 'complaint' &&
             !complaintTransactionAuthorized(input.db))
@@ -46,13 +61,23 @@ export function reassignTask(input) {
             fail('reviewer_unavailable');
         const now = nowFrom(input.clock);
         const nowMs = now.getTime();
-        const explanation = assignmentExplanation('manual', selectedReviewer);
+        if (automatic)
+            assertTransferAllowed(input.db, {
+                donor: current.reviewer_user_id,
+                receiver: selectedReviewer.userId,
+                group: 'customer_support',
+                createdAt: current.created_at,
+                now: nowMs,
+            });
+        const explanation = automatic
+            ? 'Automatic redistribution preserving monthly assignment fairness'
+            : assignmentExplanation('manual', selectedReviewer);
         invalidateRunningDraft(input.db, current.id, nowMs);
         const changed = input.db
-            .prepare(`UPDATE chat_qa_tasks SET reviewer_user_id=?,assignment_reason=?,assignment_explanation=?,
+            .prepare(`UPDATE chat_qa_tasks SET reviewer_user_id=?,assignment_origin=?,assignment_reason=?,assignment_explanation=?,
          assigned_at=?,deadline_at=?,updated_at=?
       WHERE id=? AND status IN ('assigned','in_progress')`)
-            .run(selectedReviewer.userId, reason, explanation, nowMs, addBakuCalendarDays(now, settings.sla_days).getTime(), nowMs, current.id).changes;
+            .run(selectedReviewer.userId, automatic ? 'automatic' : 'manual', reason, explanation, nowMs, automatic ? current.deadline_at : addBakuCalendarDays(now, settings.sla_days).getTime(), nowMs, current.id).changes;
         if (changed !== 1)
             fail('task_state_conflict');
         resolveReviewerTaskNotifications(input.db, current.id, current.reviewer_user_id, nowMs);

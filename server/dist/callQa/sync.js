@@ -8,6 +8,7 @@ import { normalizeCallInterval } from './time.js';
 import { suggestCallAgentMappings } from './syncMappings.js';
 import { publishCallSourceStatus } from './sourceEvents.js';
 import { SourceDiagnosticError } from '../chatQa/sourceDiagnostics.js';
+import { callSyncError } from './syncDiagnostics.js';
 const DATE = /^\d{4}-\d{2}-\d{2}$/u;
 const SERVICE_FAILURE = 'call catalog synchronization failed';
 const DAY_MS = 86_400_000;
@@ -178,21 +179,27 @@ export async function syncCallCatalog(input) {
             if (signal.aborted)
                 throw new Error(SERVICE_FAILURE);
             if (counters.pages >= maxPages)
-                throw new Error(SERVICE_FAILURE);
+                throw new SourceDiagnosticError('source_catalog_limit');
             const page = await source.readPage({ window: input.window, pageSize: input.pageSize, cursor, signal }, input.normalizationProtection);
             if (signal.aborted)
                 throw new Error(SERVICE_FAILURE);
             counters.pages += 1;
             counters.seen += page.results.length;
             if (counters.seen > maxRows)
-                throw new Error(SERVICE_FAILURE);
+                throw new SourceDiagnosticError('source_catalog_limit');
             const accepted = [];
             for (const result of page.results) {
                 if (result.kind === 'ineligible') {
                     const reason = safeExclusionCode(result.code);
                     countExclusion(counters, reason);
-                    if (!input.complaintOnly)
-                        persistTrustedExclusion(input.db, result.sourceRef, reason, now);
+                    if (!input.complaintOnly) {
+                        try {
+                            persistTrustedExclusion(input.db, result.sourceRef, reason, now);
+                        }
+                        catch {
+                            throw new SourceDiagnosticError('source_persistence_failed');
+                        }
+                    }
                     continue;
                 }
                 if (input.acceptRecord && !input.acceptRecord(result.record))
@@ -217,7 +224,12 @@ export async function syncCallCatalog(input) {
                 pagesDone: counters.pages,
                 count: counters.inserted + counters.updated,
             });
-            persistPage(input, accepted, now, counters);
+            try {
+                persistPage(input, accepted, now, counters);
+            }
+            catch {
+                throw new SourceDiagnosticError('source_persistence_failed');
+            }
             cursor = page.nextCursor;
             input.onProgress?.({
                 pagesDone: counters.pages,
@@ -225,15 +237,13 @@ export async function syncCallCatalog(input) {
             });
             if (cursor !== null) {
                 if (seenCursors.has(cursor))
-                    throw new Error(SERVICE_FAILURE);
+                    throw new SourceDiagnosticError('source_identity_conflict');
                 seenCursors.add(cursor);
             }
         } while (cursor !== null);
         return counters;
     }
     catch (error) {
-        if (input.complaintOnly && error instanceof SourceDiagnosticError)
-            throw error;
-        throw new Error(SERVICE_FAILURE);
+        throw callSyncError(error);
     }
 }
