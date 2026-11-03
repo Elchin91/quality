@@ -67,7 +67,9 @@ function immediate(db, work) {
         const code = sqliteCode(error);
         if (code === 'SQLITE_CONSTRAINT_UNIQUE')
             fail('completion_conflict');
-        fail('task_state_conflict');
+        if (code === 'SQLITE_BUSY' || code === 'SQLITE_BUSY_SNAPSHOT' || code === 'SQLITE_LOCKED')
+            fail('completion_busy', 503);
+        fail('completion_failed', 500);
     }
 }
 function completionResult(task, evaluation, criteria, notes, overallNote) {

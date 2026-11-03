@@ -81,6 +81,20 @@ export function createCallQaReviewerRouter(options) {
             sendCallQaError(res, error);
         }
     }));
+    router.get('/call-qa/tasks/:id/completion', reviewer, asyncRoute(async (req, res) => {
+        const taskId = parseId(req.params.id);
+        if (!taskId)
+            return invalid(res);
+        res.setHeader('Cache-Control', 'private, no-store');
+        try {
+            if (!dependencies.getCompletion)
+                return res.status(404).json({ code: 'not_found' });
+            res.json(await dependencies.getCompletion({ taskId, reviewerUserId: reviewerId(req) }));
+        }
+        catch (error) {
+            sendCallQaError(res, error);
+        }
+    }));
     router.get('/call-qa/tasks/:id/review-source', reviewer, asyncRoute(async (req, res) => {
         const taskId = parseId(req.params.id);
         if (!taskId)

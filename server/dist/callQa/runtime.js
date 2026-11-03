@@ -1,3 +1,4 @@
+import { getReviewerCallQaCompletion } from './savedCompletion.js';
 import { getCallQaReviewSource, rejectCallQaAiDraft, saveCallQaTranscriptCorrections, } from './aiDraft.js';
 import { createCallQaAutomation } from './automation.js';
 import { createAdminCallSync } from './adminSync.js';
@@ -261,6 +262,7 @@ export function createCallQaRuntime(options) {
     const reviewer = {
         listTasks: async (input) => listReviewerCallQaTasks(options.db, input),
         getTask: async (input) => getReviewerCallQaTask(options.db, input),
+        getCompletion: async (input) => getReviewerCallQaCompletion(options.db, input),
         start: async (input) => {
             startCallQaTask({ db: options.db, ...input });
             return getReviewerCallQaTask(options.db, {
