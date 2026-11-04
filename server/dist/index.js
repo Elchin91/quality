@@ -33,6 +33,7 @@ import { scorecardRouter } from './routes/scorecard.js';
 import { agentsRouter } from './routes/agents.js';
 import { createTeamRouter } from './team/routes.js';
 import { createTeamMediaRouter } from './team/media.js';
+import { createEvaluationConversationRouter } from './evaluationConversation/routes.js';
 import { createNavigationRouter } from './navigation.js';
 import { createStaffRouter } from './users/staff.js';
 import { analyticsRouter } from './routes/analytics.js';
@@ -248,6 +249,7 @@ app.use('/api', createChatContextRouter({
 }));
 // Agent-scoped portal.
 app.use('/api', meRouter);
+app.use('/api', createEvaluationConversationRouter(db, uploadsDir, callQaRuntime.openReadyRecording));
 app.use('/api', createHistoricalEvaluationRouter(db));
 app.use('/api', appealsRouter);
 app.use('/api', createEvaluationAttachmentRouter({

@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { ChatAttachmentAccessError } from '../chatQa/attachmentAccess.js';
 import { evaluationAttachmentTask } from '../chatQa/evaluationAttachmentAuthorization.js';
-import { resolveEvaluationEvidence } from '../chatQa/service.js';
+import { effectiveTranscriptJson } from '../chatQa/retention.js';
 import { parseRetainedEvidence } from '../appeals/serialization.js';
 import { asyncRoute, chatQaPrivateEvidenceHeaders, idSchema, invalid } from '../chatQa/http.js';
 const indexSchema = z
@@ -23,7 +23,7 @@ export function createEvaluationAttachmentRouter(input) {
                 const taskId = evaluationAttachmentTask(input.database, id.data, req.user.id);
                 if (!taskId)
                     return res.status(404).json({ error: 'not_found', code: 'not_found' });
-                const retained = resolveEvaluationEvidence(input.database, id.data);
+                const retained = effectiveTranscriptJson(input.database, taskId);
                 return res.json({ entries: parseRetainedEvidence(retained) });
             }
             catch {

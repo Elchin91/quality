@@ -74,7 +74,7 @@ export function recordingAccessTableSql(table = 'call_recording_access_events', 
     actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
     actor_role TEXT,
     action TEXT NOT NULL
-      CHECK(action IN ('admin_preview','reviewer_stream','team_lead_stream','streamed','downloaded')),
+      CHECK(action IN ('admin_preview','reviewer_stream','team_lead_stream','agent_stream','streamed','downloaded')),
     playback_session_id TEXT,
     created_at_utc TEXT NOT NULL${preserveLegacyTimestamp ? '' : " CHECK(created_at_utc GLOB '????-??-??T??:??:??*Z')"}
   )`;
@@ -93,7 +93,8 @@ export function migrateRecordingAccessTable(db) {
     if (present.has('actor_role') &&
         present.has('playback_session_id') &&
         task?.notnull === 0 &&
-        definition.includes("'team_lead_stream'")) {
+        definition.includes("'team_lead_stream'") &&
+        definition.includes("'agent_stream'")) {
         return;
     }
     const select = accessColumns.map((column) => (present.has(column) ? column : 'NULL'));
@@ -154,14 +155,27 @@ export function createRecordingAccessGuards(db) {
       AND lead.role='team_lead' AND lead.active=1 AND lead.must_change_password=0
   )`
         : '1=1';
+    const agentReady = tableHasColumns(db, 'evaluations', ['id', 'agent_id', 'type', 'status', 'source_ref']) &&
+        tableHasColumns(db, 'call_qa_tasks', ['evaluation_id', 'agent_id']) &&
+        tableHasColumns(db, 'users', ['agent_id']);
+    const agentGuard = agentReady
+        ? `NEW.actor_role<>'agent' OR NEW.task_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM call_qa_tasks tasks JOIN evaluations e ON e.id=tasks.evaluation_id
+    JOIN users actor ON actor.id=NEW.actor_user_id AND actor.agent_id=e.agent_id
+    WHERE tasks.id=NEW.task_id AND tasks.source_record_id=NEW.source_record_id
+      AND tasks.status='completed' AND e.status='completed' AND e.type='call'
+      AND e.agent_id=tasks.agent_id AND e.source_ref='call-qa:'||tasks.source_record_id
+      AND actor.role='agent' AND actor.active=1 AND actor.must_change_password=0
+  )`
+        : '1=1';
     const identityTrigger = hasFullAccessDependencies(db)
         ? `CREATE TRIGGER call_recording_access_events_identity_insert
       BEFORE INSERT ON call_recording_access_events
       FOR EACH ROW WHEN
         call_qa_valid_access_id(NEW.id) <> 1 OR
         call_qa_valid_access_time(NEW.created_at_utc) <> 1 OR
-        NEW.actor_user_id IS NULL OR NEW.actor_role NOT IN ('admin','reviewer','team_lead') OR
-        NEW.action NOT IN ('admin_preview','reviewer_stream','team_lead_stream') OR
+        NEW.actor_user_id IS NULL OR NEW.actor_role NOT IN ('admin','reviewer','team_lead','agent') OR
+        NEW.action NOT IN ('admin_preview','reviewer_stream','team_lead_stream','agent_stream') OR
         NEW.playback_session_id IS NULL OR
         length(NEW.playback_session_id) NOT BETWEEN 16 AND 128 OR
         NEW.playback_session_id GLOB '*[^A-Za-z0-9_-]*' OR
@@ -192,6 +206,7 @@ export function createRecordingAccessGuards(db) {
               AND tasks.status IN ('assigned','in_progress')
           ))
         ) OR (NEW.action='team_lead_stream' AND (${teamGuard}))
+        OR (NEW.action='agent_stream' AND (${agentGuard}))
     BEGIN SELECT RAISE(ABORT, 'invalid recording access event'); END`
         : `CREATE TRIGGER call_recording_access_events_identity_insert
       BEFORE INSERT ON call_recording_access_events

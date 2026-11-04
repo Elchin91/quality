@@ -208,6 +208,16 @@ export function migrateEvaluationSourceTextNullable(db) {
     db.pragma('foreign_keys = OFF');
     try {
         db.transaction(() => {
+            // SQLite validates triggers on other tables during RENAME. Preserve this guard
+            // inside the same transaction while its referenced evaluations table is rebuilt.
+            const recordingIdentity = db
+                .prepare(`SELECT sql FROM sqlite_master WHERE type='trigger'
+            AND name='call_recording_access_events_identity_insert'
+            AND tbl_name='call_recording_access_events'`)
+                .pluck()
+                .get();
+            if (recordingIdentity)
+                db.exec('DROP TRIGGER call_recording_access_events_identity_insert');
             db.exec(`
         CREATE TABLE evaluations_nullable_source (
           id TEXT PRIMARY KEY,
@@ -245,6 +255,8 @@ export function migrateEvaluationSourceTextNullable(db) {
         CREATE UNIQUE INDEX idx_evals_source_ref
           ON evaluations(source_ref) WHERE source_ref IS NOT NULL;
       `);
+            if (recordingIdentity)
+                db.exec(recordingIdentity);
             if (db.pragma('foreign_key_check').length > 0) {
                 throw new Error('evaluation source migration violated foreign keys');
             }
