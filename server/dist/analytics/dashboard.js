@@ -1,5 +1,5 @@
 import { criteriaKeysFor, isQaV2Kind } from '../prompts/scorecardRegistry.js';
-import { buildEffectiveEvaluationWhere, businessDateSql, effectiveCriteriaSql, effectiveScoreSql, } from '../effectiveEvaluations.js';
+import { buildEffectiveEvaluationWhere, businessDateSql, effectiveCriteriaSql, effectiveScoreSql, metadataDimensionSql, } from '../effectiveEvaluations.js';
 import { periodKey } from './filters.js';
 import { andWhere, hasCriticalViolation, SCORECARD_KIND_ORDER, scorecardFilterSql, scorecardKindSql, toScorecardKind, } from './scorecardFilter.js';
 const UNKNOWN = '__unknown__';
@@ -15,8 +15,16 @@ function metadata(row) {
     }
 }
 function dimension(row, key) {
+    if (key === 'reviewer' && row.reviewer_name)
+        return row.reviewer_name;
     const value = metadata(row)[key];
     return typeof value === 'string' && value.trim() ? value.trim() : UNKNOWN;
+}
+/** Older analytical fixtures/exports may not contain the live user directory. */
+function hasReviewerDirectory(database) {
+    const columns = (table) => new Set(database.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
+    const users = columns('users');
+    return users.has('id') && users.has('name') && columns('evaluations').has('evaluator_id');
 }
 function loadRows(database, filters, previous = false) {
     let from = filters.from;
@@ -32,6 +40,7 @@ function loadRows(database, filters, previous = false) {
         agentIds: filters.agentIds,
         teamLeaders: filters.teamLeaders,
         reviewers: filters.reviewers,
+        resolveReviewerName: hasReviewerDirectory(database),
         classifiers: filters.classifiers,
     });
     const hasAppeals = Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='appeals'").get());
@@ -43,6 +52,7 @@ function loadRows(database, filters, previous = false) {
     const whereSql = andWhere(where.sql, scorecardFilterSql(filters.scorecard, 'e', criteria));
     const rows = database
         .prepare(`SELECT e.id, e.agent_id, a.name AS agent_name, ${score} AS score,
+              ${metadataDimensionSql('reviewer', 'e', hasReviewerDirectory(database))} AS reviewer_name,
               ${criteria} AS criteria_json, e.source_metadata_json, e.created_at,
               ${businessDateSql()} AS business_date,
               ${scorecardKindSql('e', criteria)} AS scorecard
@@ -59,6 +69,7 @@ function unknownContactCount(database, filters) {
         agentIds: filters.agentIds,
         teamLeaders: filters.teamLeaders,
         reviewers: filters.reviewers,
+        resolveReviewerName: hasReviewerDirectory(database),
         classifiers: filters.classifiers,
     });
     const hasRevisions = Boolean(database
@@ -185,7 +196,11 @@ function filterOptions(database) {
     const agents = database
         .prepare('SELECT id, name AS label FROM agents ORDER BY name COLLATE NOCASE')
         .all();
-    const rows = database.prepare('SELECT source_metadata_json FROM evaluations').all();
+    const rows = database
+        .prepare(`SELECT e.source_metadata_json,
+    ${metadataDimensionSql('reviewer', 'e', hasReviewerDirectory(database))} AS reviewer_name
+    FROM evaluations e`)
+        .all();
     const values = (key) => [...new Set(rows.map((row) => dimension(row, key)))]
         .sort((a, b) => a.localeCompare(b))
         .map((value) => ({ value, label: value === UNKNOWN ? 'Unknown' : value }));

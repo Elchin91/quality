@@ -200,6 +200,7 @@ scorecardRouter.get('/evaluations', (req, res) => {
         agentIds: agent_id,
         teamLeaders: team_leader,
         reviewers: reviewer,
+        resolveReviewerName: true,
         classifiers: classifier,
         scoreMin: score_min,
         scoreMax: score_max,

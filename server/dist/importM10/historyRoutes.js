@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { historyActor, historicalRows, historicalItem, historicalDetail } from './history.js';
+import { callHistoryRows, callHistoryItem, callHistoryDetail } from './callHistory.js';
 const date = z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -33,6 +34,41 @@ export function createHistoricalEvaluationRouter(db) {
         res.locals.historyActor = actor;
         next();
     };
+    const callFilters = z
+        .object({
+        customer_number: z
+            .string()
+            .regex(/^\d{3,32}$/u)
+            .optional(),
+        limit: z.coerce.number().int().min(1).max(100).default(25),
+        offset: z.coerce.number().int().min(0).max(1000000).default(0),
+    })
+        .strict();
+    router.get('/history/call-evaluations', authorize, (req, res) => {
+        if (res.locals.historyActor.role !== 'reviewer')
+            return res.status(403).json({ error: 'forbidden' });
+        const query = callFilters.safeParse(req.query);
+        if (!query.success)
+            return res.status(400).json({ error: 'invalid query' });
+        const rows = callHistoryRows(db, res.locals.historyActor, query.data);
+        const { limit, offset } = query.data;
+        res.json({
+            total: rows.length,
+            limit,
+            offset,
+            items: rows.slice(offset, offset + limit).map(callHistoryItem),
+        });
+    });
+    router.get('/history/call-evaluations/:id', authorize, (req, res) => {
+        if (res.locals.historyActor.role !== 'reviewer')
+            return res.status(403).json({ error: 'forbidden' });
+        if (!z.string().min(1).max(200).safeParse(req.params.id).success)
+            return res.status(400).json({ error: 'invalid id' });
+        const row = callHistoryRows(db, res.locals.historyActor, { id: req.params.id })[0];
+        if (!row)
+            return res.status(404).json({ error: 'not found' });
+        res.json(callHistoryDetail(row));
+    });
     router.get('/history/evaluations', authorize, (req, res) => {
         const query = filters.safeParse(req.query);
         if (!query.success)
