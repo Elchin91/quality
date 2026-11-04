@@ -7,6 +7,7 @@ import { decodeAgentComment, decodeAgentEvaluation, } from '../evaluationSeriali
 import { businessDateSql, effectiveEvaluationProjection } from '../effectiveEvaluations.js';
 import { effectiveCriteriaSql, effectiveScoreSql } from '../effectiveEvaluations.js';
 import { bakuDate } from '../analytics/filters.js';
+import { createEvaluationContactResolver } from '../contactContext/evaluationContact.js';
 export const meRouter = Router();
 const evaluationListQuery = z.object({
     type: z.enum(['call', 'chat', 'unknown']).optional(),
@@ -73,12 +74,15 @@ meRouter.get('/me/evaluations', requireAgent, (req, res) => {
             .all(...idList);
         commentStats = Object.fromEntries(stats.map((s) => [s.evaluation_id, { total: s.total, admin_comments: s.admin_comments }]));
     }
+    const resolveContact = createEvaluationContactResolver(db);
+    res.setHeader('Cache-Control', 'private, no-store');
     res.json({
         total,
         limit: lim,
         offset: off,
         items: rows.map((r) => ({
             ...decodeAgentEvaluation(r),
+            contact: resolveContact(r),
             comment_count: commentStats[r.id]?.total ?? 0,
             evaluator_comment_count: commentStats[r.id]?.admin_comments ?? 0,
         })),
@@ -104,8 +108,10 @@ meRouter.get('/me/evaluations/:id', requireAgent, (req, res) => {
     // Redact author identity for admin comments — agents only see the literal
     // role label.
     const redacted = comments.map(decodeAgentComment);
+    res.setHeader('Cache-Control', 'private, no-store');
     res.json({
         ...decodeAgentEvaluation(row),
+        contact: createEvaluationContactResolver(db)(row),
         comments: redacted,
     });
 });

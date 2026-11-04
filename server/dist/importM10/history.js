@@ -2,6 +2,7 @@ import { APPEAL_ACCOUNTS } from '../appealAccounts.js';
 import { normalizeAlias } from '../appeals/assignment.js';
 import { businessDateSql, effectiveEvaluationProjection } from '../effectiveEvaluations.js';
 import { decodeAgentEvaluation } from '../evaluationSerialization.js';
+import { historicalEvaluationContact } from '../contactContext/evaluationContact.js';
 export function historyActor(db, id) {
     return db
         .prepare(`SELECT id,role,agent_id FROM users WHERE id=? AND active=1
@@ -101,6 +102,7 @@ export function historicalRows(db, actor, filters = {}) {
 }
 export function historicalItem(row) {
     return {
+        contact: historicalEvaluationContact(row.source_metadata_json),
         id: row.id,
         agent_name: row.agent_name,
         score: row.score,

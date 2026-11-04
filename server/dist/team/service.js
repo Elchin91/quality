@@ -2,6 +2,7 @@ import { businessDateSql, effectiveEvaluationProjection } from '../effectiveEval
 import { decodeAgentEvaluation } from '../evaluationSerialization.js';
 import { historicalTeamAssignments } from './history.js';
 import { teamCallMaterial } from './materials.js';
+import { createEvaluationContactResolver } from '../contactContext/evaluationContact.js';
 export function teamWhere(userId, filters) {
     const conditions = [
         `EXISTS (SELECT 1 FROM agent_team_memberships m
@@ -113,12 +114,14 @@ export function teamEvaluations(db, userId, filters, limit, offset) {
     FROM evaluations e JOIN agents a ON a.id=e.agent_id ${projection.joins}
     WHERE ${where.sql} ORDER BY business_date DESC,e.created_at DESC,e.id DESC LIMIT ? OFFSET ?`)
         .all(...where.args, limit, offset);
+    const resolveContact = createEvaluationContactResolver(db);
     return {
         total,
         limit,
         offset,
         items: rows.map((row) => ({
             id: row.id,
+            contact: resolveContact(row),
             agent_id: row.agent_id,
             agent_name: row.agent_name,
             score: row.score,
@@ -141,6 +144,7 @@ export function teamEvaluation(db, userId, id) {
     const decoded = decodeAgentEvaluation(row);
     return {
         id: row.id,
+        contact: createEvaluationContactResolver(db)(row),
         agent_id: row.agent_id,
         agent_name: row.agent_name,
         score: decoded.score,
