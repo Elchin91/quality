@@ -10,6 +10,8 @@ import { enqueueReviewerRefill } from '../jobs/qaRefill.js';
 import { configuredDefaultCapacity, reviewerReadiness, reviewerReadinessMap, updateReviewerProfile, REVIEWER_GROUPS, } from '../reviewerAssignment/repository.js';
 export const adminUsersRouter = Router();
 const AGENT_ALREADY_LINKED = 'agent profile already linked to another user';
+const EMAIL_IN_USE = 'email already registered';
+const PROFILE_EMAIL_IN_USE = 'email already belongs to another agent profile';
 function assertStaffActor(actorId, expectedSession) {
     const actor = db.prepare('SELECT * FROM users WHERE id = ?').get(actorId);
     if (!actor ||
@@ -54,6 +56,7 @@ adminUsersRouter.get('/admin/users', requireAuth, requireAdmin, (_req, res) => {
 const createSchema = z.object({
     email: z
         .string()
+        .trim()
         .email()
         .transform(normalizeEmail)
         .refine(isAllowedEmail, { message: `email must end with @${ALLOWED_DOMAIN}` }),
@@ -159,6 +162,7 @@ adminUsersRouter.post('/admin/users', requireAuth, requireAdmin, asyncHandler(as
 }));
 const patchSchema = z
     .object({
+    email: createSchema.shape.email.optional(),
     role: z.enum(['admin', 'agent', 'team_lead', 'reviewer']).optional(),
     active: z.boolean().optional(),
     name: z.string().trim().min(1).max(80).optional(),
@@ -235,6 +239,11 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
     }
     const updates = [];
     const args = [];
+    const email = parsed.data.email;
+    if (email !== undefined) {
+        updates.push('email = ?');
+        args.push(email);
+    }
     if (parsed.data.role !== undefined) {
         updates.push('role = ?');
         args.push(parsed.data.role);
@@ -270,6 +279,17 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
     try {
         db.transaction(() => {
             assertStaffActor(req.user.id, actor?.session_version ?? 0);
+            if (email !== undefined) {
+                if (db
+                    .prepare('SELECT 1 FROM users WHERE lower(trim(email)) = ? AND id <> ?')
+                    .get(email, target.id))
+                    throw new Error(EMAIL_IN_USE);
+                if (resultingAgentId &&
+                    db
+                        .prepare('SELECT 1 FROM agents WHERE lower(trim(email)) = ? AND id <> ?')
+                        .get(email, resultingAgentId))
+                    throw new Error(PROFILE_EMAIL_IN_USE);
+            }
             if (target.role === 'admin' &&
                 target.active &&
                 (resultingRole !== 'admin' || parsed.data.active === false)) {
@@ -282,6 +302,8 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
             if (updates.length) {
                 db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...args);
             }
+            if (resultingAgentId && email !== undefined)
+                db.prepare('UPDATE agents SET email = ? WHERE id = ?').run(email, resultingAgentId);
             if (resultingAgentId && parsed.data.name !== undefined && parsed.data.name !== target.name)
                 db.prepare('UPDATE agents SET name = ? WHERE id = ?').run(parsed.data.name, resultingAgentId);
             if (requestedLead !== undefined &&
@@ -293,6 +315,7 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
                 agent_id: parsed.data.agent_id,
                 team_lead_user_id: requestedLead,
                 password_reset: parsed.data.new_password !== undefined,
+                email_changed: email !== undefined && email !== target.email ? true : undefined,
             });
             if (updatesReviewerProfile) {
                 const current = reviewerReadiness(db, req.params.id, configuredDefaultCapacity(db));
@@ -318,10 +341,14 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
             return res.status(400).json({ error: error.message });
         if (error instanceof Error && error.message === 'staff_membership_conflict')
             return res.status(409).json({ error: 'staff membership changed; retry' });
+        if (error instanceof Error && [EMAIL_IN_USE, PROFILE_EMAIL_IN_USE].includes(error.message))
+            return res.status(409).json({ error: error.message });
         if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
             if (isAgentLinkConstraint(error)) {
                 return res.status(409).json({ error: AGENT_ALREADY_LINKED });
             }
+            if (error instanceof Error && error.message.includes('users.email'))
+                return res.status(409).json({ error: EMAIL_IN_USE });
         }
         throw error;
     }

@@ -92,6 +92,10 @@ export function createGatedAttachmentFetch(client, maxConcurrentFetches = 3) {
             release?.();
             if (error instanceof ChatAttachmentError && error.code === 'attachment_unavailable')
                 return fail('attachment_unavailable', 404);
+            if (error instanceof ChatAttachmentError && error.code === 'attachment_too_large')
+                return fail('attachment_too_large', 413);
+            if (error instanceof ChatAttachmentError && error.code === 'request_timeout')
+                return fail('request_timeout', 504);
             return fail('source_unavailable', 503);
         }
     };

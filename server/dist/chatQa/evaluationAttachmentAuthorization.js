@@ -1,4 +1,5 @@
 import { readableTeamEvaluationSql } from '../team/access.js';
+import { sharedLeadInboxSql } from '../appeals/leadRouting.js';
 /** Derive media task context only from a visible completed evaluation, never a browser task ID. */
 export function evaluationAttachmentTask(db, evaluationId, userId) {
     const user = db
@@ -17,12 +18,19 @@ export function evaluationAttachmentTask(db, evaluationId, userId) {
             .all(userId, evaluationId);
         return rows.length === 1 ? rows[0].id : null;
     }
-    const scope = user.role === 'team_lead' ? { sql: readableTeamEvaluationSql, args: [] } : null;
-    const condition = scope?.sql ??
-        (user.role === 'reviewer'
-            ? `(e.evaluator_id=? OR EXISTS (SELECT 1 FROM appeals a WHERE a.evaluation_id=e.id AND a.assigned_reviewer_id=?))`
-            : '1=1');
-    const args = scope?.args ?? (user.role === 'reviewer' ? [userId, userId] : []);
+    let condition = '1=1';
+    const args = [];
+    if (user.role === 'team_lead') {
+        condition = `(${readableTeamEvaluationSql}) OR EXISTS (
+      SELECT 1 FROM appeals p JOIN source_interactions s ON s.id=t.interaction_id
+      WHERE p.evaluation_id=e.id AND p.agent_id=e.agent_id AND t.agent_id=e.agent_id
+        AND e.type='chat' AND e.source_ref='chat-qa:'||s.id AND ${sharedLeadInboxSql}
+    )`;
+    }
+    else if (user.role === 'reviewer') {
+        condition = `e.evaluator_id=? OR EXISTS (SELECT 1 FROM appeals a WHERE a.evaluation_id=e.id AND a.assigned_reviewer_id=?)`;
+        args.push(userId, userId);
+    }
     const row = db
         .prepare(`SELECT t.id FROM chat_qa_tasks t JOIN evaluations e ON e.id=t.evaluation_id
     WHERE e.id=? AND e.status='completed' AND t.status='completed' AND (${condition}) LIMIT 1`)

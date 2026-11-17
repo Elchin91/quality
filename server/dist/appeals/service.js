@@ -5,7 +5,9 @@ import { criteriaKeysFor, isQaV2Kind, parseCriteriaFor, scoreFor, } from '../pro
 import { QA_V2_PENALTY_CRITERIA } from '../prompts/qaV2Scorecard.js';
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
 import { appealEligibility } from './date.js';
-import { normalizeAlias, selectEligibleReviewer } from './assignment.js';
+import { selectEligibleReviewer } from './assignment.js';
+import { appealLead, evaluationLead } from './leadRouting.js';
+import { publishAppealChange } from './notifications.js';
 import { AppealError } from './types.js';
 function parseMetadata(json) {
     try {
@@ -83,36 +85,6 @@ function validateForKind(kind, criteria, prior) {
         return validateTelesalesCriteria(criteria);
     return validateCriteria(criteria);
 }
-function mappedLeadUserId(db, label) {
-    const row = db
-        .prepare(`SELECT aliases.user_id
-         FROM team_lead_aliases aliases
-         JOIN users ON users.id=aliases.user_id
-        WHERE aliases.normalized_label=?
-          AND users.active=1 AND users.role='team_lead'`)
-        .get(normalizeAlias(label));
-    return row?.user_id ?? null;
-}
-function latestHistoricalMappedLeadUserId(db, evaluation) {
-    if (!evaluation.agent_id)
-        return null;
-    const rows = db
-        .prepare(`SELECT json_extract(source_metadata_json,'$.team_leader') AS team_leader
-         FROM evaluations
-        WHERE agent_id=? AND id<>? AND created_at<=? AND json_valid(source_metadata_json)
-          AND typeof(json_extract(source_metadata_json,'$.team_leader'))='text'
-          AND trim(json_extract(source_metadata_json,'$.team_leader'))<>''
-        ORDER BY created_at DESC,id DESC`)
-        .all(evaluation.agent_id, evaluation.id, evaluation.created_at);
-    for (const row of rows) {
-        if (typeof row.team_leader !== 'string')
-            continue;
-        const userId = mappedLeadUserId(db, row.team_leader);
-        if (userId)
-            return userId;
-    }
-    return null;
-}
 export class AppealService {
     db;
     options;
@@ -127,7 +99,7 @@ export class AppealService {
                 .get(userId));
     }
     needsAdminLeadFallback(appeal) {
-        return (appeal.status === 'pending_lead' && !this.leadAvailable(appeal.required_team_lead_user_id));
+        return appeal.status === 'pending_lead' && !this.leadAvailable(appealLead(this.db, appeal));
     }
     appeal(id) {
         const row = this.db.prepare('SELECT * FROM appeals WHERE id=?').get(id);
@@ -141,33 +113,9 @@ export class AppealService {
       (id,appeal_id,actor_user_id,event_type,from_status,to_status,metadata_json,created_at)
        VALUES (?,?,?,?,?,?,?,?)`)
             .run(nanoid(12), appealId, actorId, event, from, to, JSON.stringify(metadata), now);
-        writeAppEventIfReady(this.db, {
-            type: 'appeal.changed',
-            entityType: 'appeal',
-            entityId: appealId,
-            revision: now,
-            audienceRole: 'admin',
-            now,
-        });
-        const appeal = this.db
-            .prepare(`SELECT requester_user_id,required_team_lead_user_id,assigned_reviewer_id
-           FROM appeals WHERE id=?`)
-            .get(appealId);
-        const recipients = new Set([
-            appeal.requester_user_id,
-            appeal.required_team_lead_user_id,
-            appeal.assigned_reviewer_id,
-        ].filter((id) => id !== null));
-        for (const recipientUserId of recipients) {
-            writeAppEventIfReady(this.db, {
-                type: 'appeal.changed',
-                entityType: 'appeal',
-                entityId: appealId,
-                revision: now,
-                recipientUserId,
-                now,
-            });
-        }
+        const appeal = this.appeal(appealId);
+        const affectsLeadInbox = from !== to && (from === 'pending_lead' || to === 'pending_lead');
+        publishAppealChange(this.db, appeal, affectsLeadInbox && !!appealLead(this.db, appeal), now);
     }
     notify(userId, type, appealId, now) {
         const notificationId = nanoid(12);
@@ -206,14 +154,11 @@ export class AppealService {
             throw new AppealError(eligibility.reason, 409);
         const metadata = parseMetadata(evaluation.source_metadata_json);
         const reviewerLabel = typeof metadata.reviewer === 'string' ? metadata.reviewer.trim() || null : null;
-        const directLeadLabel = typeof metadata.team_leader === 'string' ? normalizeAlias(metadata.team_leader) : null;
-        const lead = directLeadLabel
-            ? mappedLeadUserId(this.db, directLeadLabel)
-            : latestHistoricalMappedLeadUserId(this.db, evaluation);
         const now = input.now?.getTime() ?? Date.now();
         const id = nanoid(12);
         try {
             return runImmediate(this.db, () => {
+                const lead = evaluationLead(this.db, evaluation, metadata.team_leader);
                 this.db
                     .prepare(`INSERT INTO appeals
           (id,evaluation_id,requester_user_id,agent_id,reason,status,original_evaluator_user_id,
@@ -246,14 +191,12 @@ export class AppealService {
             const appeal = this.appeal(input.appealId);
             if (appeal.status !== 'pending_lead')
                 throw new AppealError('appeal_state_conflict', 409);
-            const fallback = this.needsAdminLeadFallback(appeal);
-            const permitted = fallback
-                ? input.actorRole === 'admin' &&
-                    !!this.db
-                        .prepare("SELECT id FROM users WHERE id=? AND role='admin' AND active=1")
-                        .get(input.actorUserId)
-                : appeal.required_team_lead_user_id === input.actorUserId;
-            if (!permitted)
+            const lead = appealLead(this.db, appeal);
+            const fallback = input.actorRole === 'admin';
+            const actor = this.db
+                .prepare('SELECT 1 FROM users WHERE id=? AND role=? AND active=1 AND must_change_password=0')
+                .get(input.actorUserId, fallback ? 'admin' : 'team_lead');
+            if (!actor || (fallback ? this.leadAvailable(lead) : lead === null))
                 throw new AppealError('forbidden', 403);
             if ((input.decision === 'reject' || fallback) && !input.note?.trim())
                 throw new AppealError('appeal_state_conflict', 400);

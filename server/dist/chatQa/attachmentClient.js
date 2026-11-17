@@ -16,6 +16,9 @@ export class ChatAttachmentError extends Error {
 function fail(code) {
     throw new ChatAttachmentError(code);
 }
+function requestFailure(error, fallback) {
+    return fail(error instanceof Error && error.name === 'TimeoutError' ? 'request_timeout' : fallback);
+}
 function approvedBaseUrl(value) {
     try {
         const parsed = new URL(value);
@@ -80,8 +83,10 @@ async function boundedBody(response, maximum) {
             chunks.push(Buffer.from(chunk.value));
         }
     }
-    catch {
-        return fail('request_failed');
+    catch (error) {
+        if (error instanceof ChatAttachmentError)
+            throw error;
+        return requestFailure(error, 'request_failed');
     }
     finally {
         reader.releaseLock();
@@ -187,8 +192,8 @@ export class CallsOmniAttachmentClient {
                 origin: new URL(this.#baseUrl).origin,
             }, signal, JSON.stringify({ username: this.#username, password: this.#password })));
         }
-        catch {
-            return fail('authentication_failed');
+        catch (error) {
+            return requestFailure(error, 'authentication_failed');
         }
         if (response.status >= 300 && response.status < 400) {
             await discard(response);
@@ -202,8 +207,8 @@ export class CallsOmniAttachmentClient {
         try {
             token = (await response.json()).access_token;
         }
-        catch {
-            return fail('authentication_failed');
+        catch (error) {
+            return requestFailure(error, 'authentication_failed');
         }
         if (typeof token !== 'string' || token.length === 0)
             return fail('authentication_failed');
@@ -228,8 +233,8 @@ export class CallsOmniAttachmentClient {
         try {
             return await this.#fetch(url, this.requestInit('GET', { authorization: `Bearer ${token}`, accept: 'application/json' }, signal));
         }
-        catch {
-            return fail('request_failed');
+        catch (error) {
+            return requestFailure(error, 'request_failed');
         }
     }
     async getFile(locator, signal) {
@@ -251,6 +256,14 @@ export class CallsOmniAttachmentClient {
         if (response.status === 404 || response.status === 204) {
             await discard(response);
             return fail('attachment_unavailable');
+        }
+        if (response.status === 413) {
+            await discard(response);
+            return fail('attachment_too_large');
+        }
+        if (response.status === 408 || response.status === 504) {
+            await discard(response);
+            return fail('request_timeout');
         }
         if (response.status >= 300 && response.status < 400) {
             await discard(response);

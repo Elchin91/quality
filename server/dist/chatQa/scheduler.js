@@ -1,4 +1,3 @@
-import { deliveryItemExists } from '../qaAutomation/dailyRepository.js';
 import { purgeExpiredAiPayloads } from '../aiEvaluation/runPayloads.js';
 import { nanoid } from 'nanoid';
 import { sampleAutomaticTasks } from './assignment.js';
@@ -9,7 +8,7 @@ import { purgeExpiredAppEvents, writeAppEventIfReady } from '../realtime/appEven
 import { bakuReviewDay, previousBakuDay } from '../qaAutomation/reviewWindow.js';
 import { syncPreviousDay } from './dailySync.js';
 import { sourceDiagnosticFromError } from './sourceDiagnostics.js';
-import { listRosterQuota, quotaFor } from '../qaAutomation/quota.js';
+import { listRosterQuota } from '../qaAutomation/quota.js';
 import { CHAT_SCHEDULER_LEASE_MS } from './schema.js';
 import { assertSchedulerLease, persistSchedulerLeaseFailure, startSchedulerHeartbeat, } from './syncLease.js';
 const DAY_MS = 86_400_000;
@@ -218,29 +217,22 @@ export async function runChatQaCycle(input) {
                 (!input.rosterMode || input.rosterAssignmentsEnabled === true)) {
                 if (input.signal?.aborted)
                     throw new Error('job aborted');
-                const rosterRemaining = input.rosterMode
-                    ? new Map(listRosterQuota(input.db, now, input.reviewDate)
-                        .filter((row) => row.allowed && row.agentId && row.channel !== 'call')
-                        .map((row) => [
-                        row.agentId,
-                        quotaFor(input.db, row.agentId, now, 'chat', input.reviewDate).remaining,
-                    ]))
+                const roster = input.rosterMode
+                    ? listRosterQuota(input.db, now, input.reviewDate).filter((row) => row.allowed && row.agentId && row.channel !== 'call')
                     : undefined;
+                const rosterRemaining = roster && new Map(roster.map((row) => [row.agentId, row.remaining]));
                 const reviewDay = input.reviewDate ? bakuReviewDay(input.reviewDate) : previousBakuDay(now);
                 const verification = await verifyPendingForReviewDay(input, reviewDay, now, rosterRemaining);
                 if (input.deliveryDate)
                     assignmentFailures += verification.failed;
                 moreWork = Boolean(input.deliveryDate && verification.moreWork);
-                const sampled = samplingInput(input.db, new Date(reviewDay.start));
+                const sampled = samplingInput(input.db, new Date(reviewDay.start), input.deliveryDate, reviewDay);
                 const proposals = sampleAutomaticTasks({
                     ...sampled,
-                    candidates: sampled.candidates.filter((candidate) => !deliveryItemExists(input.db, input.deliveryDate, 'chat', candidate.interactionId) &&
-                        candidate.completedAtUtc !== undefined &&
-                        candidate.completedAtUtc >= reviewDay.start &&
-                        candidate.completedAtUtc < reviewDay.end),
                     monthlyTarget: 20,
                     reviewerOpenCap: settings.reviewer_open_cap,
                     maxAssignmentsByAgent: rosterRemaining,
+                    monthlyCoverageByAgent: roster && new Map(roster.map((row) => [row.agentId, row.completed + row.open])),
                 }, input.randomIndex);
                 const portion = input.deliveryDate ? proposals.slice(0, 32) : proposals;
                 moreWork ||= portion.length < proposals.length;

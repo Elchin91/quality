@@ -1,4 +1,28 @@
 import { writeAppEventIfReady } from '../realtime/appEvents.js';
+export function publishAppealChange(db, appeal, sharedLeadChange, now) {
+    const event = {
+        type: 'appeal.changed',
+        entityType: 'appeal',
+        entityId: appeal.id,
+        revision: now,
+        now,
+    };
+    writeAppEventIfReady(db, { ...event, audienceRole: 'admin' });
+    if (sharedLeadChange) {
+        writeAppEventIfReady(db, { ...event, audienceRole: 'team_lead' });
+    }
+    else if (appeal.required_team_lead_user_id) {
+        writeAppEventIfReady(db, {
+            ...event,
+            recipientUserId: appeal.required_team_lead_user_id,
+            recipientRole: 'team_lead',
+        });
+    }
+    for (const recipientUserId of new Set([appeal.requester_user_id, appeal.assigned_reviewer_id])) {
+        if (recipientUserId)
+            writeAppEventIfReady(db, { ...event, recipientUserId });
+    }
+}
 function visibleForRecipient(db, alias) {
     const hasChatQaTasks = db
         .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_qa_tasks'")

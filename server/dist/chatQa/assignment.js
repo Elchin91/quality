@@ -54,7 +54,7 @@ export function chooseReviewer(reviewers, cursorOrLegacyRandom = null, _reviewer
     const cursorIndex = cursor === null ? -1 : tied.findIndex(({ userId }) => userId === cursor);
     return tied[(cursorIndex + 1) % tied.length] ?? null;
 }
-function candidateIsEligible(candidate) {
+export function candidateIsEligible(candidate) {
     if (!candidate ||
         typeof candidate !== 'object' ||
         !nonEmpty(candidate.interactionId) ||
@@ -130,6 +130,10 @@ function byOldest(a, b) {
 export function sampleAutomaticTasks(input, randomIndex = randomInt) {
     const monthlyTarget = Math.min(positiveLimit(input.monthlyTarget, DEFAULT_MONTHLY_TARGET), OPERATOR_MONTHLY_LIMIT);
     const counts = monthlyCounts(input.monthlyTaskCounts);
+    for (const [agentId, coverage] of input.monthlyCoverageByAgent ?? []) {
+        assertCount(coverage);
+        counts.set(agentId, coverage);
+    }
     validateReviewers(input.reviewers);
     validateCandidateIdentities(input.candidates);
     const assignedInteractions = liveInteractions(input.liveTaskInteractionIds);
@@ -182,8 +186,8 @@ export function sampleAutomaticTasks(input, randomIndex = randomInt) {
             (counts.get(candidate.agentId) ?? 0) < OPERATOR_MONTHLY_LIMIT);
         if (!available.length)
             break;
-        const fewestForAgent = Math.min(...available.map(({ agentId }) => assignedThisRun.get(agentId) ?? 0));
-        const balanced = available.filter(({ agentId }) => (assignedThisRun.get(agentId) ?? 0) === fewestForAgent);
+        const fewestForAgent = Math.min(...available.map(({ agentId }) => counts.get(agentId)));
+        const balanced = available.filter(({ agentId }) => counts.get(agentId) === fewestForAgent);
         const fewestForWeek = Math.min(...balanced.map(({ agentId, completedAtUtc }) => chosenWeeks.get(`${agentId}:${Math.floor(((completedAtUtc ?? 0) + 4 * 3_600_000) / (7 * 86_400_000))}`) ?? 0));
         const spread = balanced.filter(({ agentId, completedAtUtc }) => (chosenWeeks.get(`${agentId}:${Math.floor(((completedAtUtc ?? 0) + 4 * 3_600_000) / (7 * 86_400_000))}`) ?? 0) === fewestForWeek);
         const index = randomIndex(spread.length);

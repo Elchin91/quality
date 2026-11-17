@@ -4,7 +4,7 @@ import { mapWithConcurrency } from './boundedPool.js';
 import { normalizeConversation } from './normalize.js';
 import { SourceDiagnosticError } from './sourceDiagnostics.js';
 import { persistedConversationEvidence } from './sourceEvidenceStore.js';
-import { samplingInput } from './samplingRepository.js';
+import { availableChatCandidates, availableChatSourceSql, monthlyAutomaticTaskCounts, } from './samplingRepository.js';
 import { logger } from '../logger.js';
 const SOURCE_SYSTEM = 'm10';
 // Matches the monthly target runChatQaCycle passes to sampleAutomaticTasks outside roster mode.
@@ -25,27 +25,6 @@ function shuffled(values, randomIndex) {
     }
     return copy;
 }
-function eligibleSupply(db, agentId, day) {
-    return db
-        .prepare(`SELECT COUNT(*) count FROM source_interactions si
-         WHERE si.agent_id=? AND si.eligibility_state='eligible'
-           AND ${ordinarySourcePredicate(db, 'source_interactions', 'si')}
-           AND si.completed_at_utc>=? AND si.completed_at_utc<?
-           AND NOT EXISTS (SELECT 1 FROM chat_qa_tasks t
-             WHERE t.interaction_id=si.id AND t.status<>'cancelled')`)
-        .get(agentId, day.start, day.end).count;
-}
-function record(db, row, update) {
-    // Only an untouched pending row changes; a concurrent catalog refresh or task wins.
-    return (db
-        .prepare(`UPDATE source_interactions SET eligibility_state=?,exclusion_reasons_json=?,
-         client_message_count=?,agent_message_count=?,attachment_count=?,
-         message_counts_verified_at=?
-         WHERE id=? AND eligibility_state='pending'
-           AND NOT EXISTS (SELECT 1 FROM chat_qa_tasks t
-             WHERE t.interaction_id=source_interactions.id AND t.status<>'cancelled')`)
-        .run(update.state, JSON.stringify(update.reasons), update.client, update.agent, update.attachments, update.now, row.id).changes === 1);
-}
 /**
  * Reads messages only for randomly ordered pending chats of operators who still need reviews,
  * until each operator has `need` eligible chats for the day or the bounded attempts run out.
@@ -55,11 +34,20 @@ export async function verifyPendingCandidates(input) {
     const clock = input.clock ?? (() => new Date());
     const randomIndex = input.randomIndex ?? randomInt;
     const result = { attempted: 0, eligible: 0, excluded: 0, failed: 0 };
+    const supplyByAgent = new Map();
+    for (const { agentId } of availableChatCandidates(db, input.deliveryDate, day))
+        supplyByAgent.set(agentId, (supplyByAgent.get(agentId) ?? 0) + 1);
     let consecutiveFailures = 0;
+    const availability = availableChatSourceSql(db, input.deliveryDate);
+    const dateArgs = input.deliveryDate ? [input.deliveryDate] : [];
     const pendingFor = db.prepare(`SELECT id,conversation_id,completed_at_utc FROM source_interactions
      WHERE source_system=? AND agent_id=? AND eligibility_state='pending'
-       AND ${ordinarySourcePredicate(db, 'source_interactions')}
-       AND completed_at_utc>=? AND completed_at_utc<? ORDER BY id`);
+       AND completed_at_utc>=? AND completed_at_utc<?
+       AND ${availability} ORDER BY id`);
+    // Recheck availability after each upstream read; the task or checkpoint may have changed.
+    const record = db.prepare(`UPDATE source_interactions SET eligibility_state=?,exclusion_reasons_json=?,
+    client_message_count=?,agent_message_count=?,attachment_count=?,message_counts_verified_at=?
+    WHERE id=? AND eligibility_state='pending' AND ${availability}`);
     const verify = async (row) => {
         const evidence = persistedConversationEvidence(db, row.id, row.conversation_id);
         if (!evidence)
@@ -78,15 +66,9 @@ export async function verifyPendingCandidates(input) {
         catch (error) {
             input.signal?.throwIfAborted();
             if (error instanceof SourceDiagnosticError && NEVER_RETRY.has(error.code)) {
-                record(db, row, {
-                    state: 'excluded',
-                    reasons: ['source_incomplete'],
-                    client: 0,
-                    agent: 0,
-                    attachments: 0,
-                    now: clock().getTime(),
-                });
-                return 'excluded';
+                return record.run('excluded', '["source_incomplete"]', 0, 0, 0, clock().getTime(), row.id, ...dateArgs).changes
+                    ? 'excluded'
+                    : 'skipped';
             }
             return 'failed';
         }
@@ -101,22 +83,15 @@ export async function verifyPendingCandidates(input) {
         if (normalized.externalAgentIds.length > 1)
             reasons.push('multi_agent');
         const state = reasons.length ? 'excluded' : 'eligible';
-        const changed = record(db, row, {
-            state,
-            reasons,
-            client: normalized.clientMessageCount,
-            agent: normalized.agentMessageCount,
-            attachments: normalized.attachmentCount,
-            now: clock().getTime(),
-        });
-        return changed ? state : 'failed';
+        const { changes } = record.run(state, JSON.stringify(reasons), normalized.clientMessageCount, normalized.agentMessageCount, normalized.attachmentCount, clock().getTime(), row.id, ...dateArgs);
+        return changes ? state : 'skipped';
     };
     const agents = [...input.needByAgent].filter(([, need]) => need > 0);
     await mapWithConcurrency(agents, input.concurrency ?? 4, async ([agentId, need]) => {
-        let missing = need - eligibleSupply(db, agentId, day);
+        let missing = need - (supplyByAgent.get(agentId) ?? 0);
         if (missing <= 0)
             return;
-        const allRows = shuffled(pendingFor.all(SOURCE_SYSTEM, agentId, day.start, day.end), randomIndex);
+        const allRows = shuffled(pendingFor.all(SOURCE_SYSTEM, agentId, day.start, day.end, ...dateArgs), randomIndex);
         const rows = allRows.slice(0, missing * ATTEMPTS_PER_NEEDED_CHAT + EXTRA_ATTEMPTS);
         for (const row of rows) {
             if (missing <= 0 || consecutiveFailures >= MAX_CONSECUTIVE_FAILURES)
@@ -124,7 +99,8 @@ export async function verifyPendingCandidates(input) {
             input.signal?.throwIfAborted();
             result.attempted++;
             const outcome = await verify(row);
-            result[outcome]++;
+            if (outcome !== 'skipped')
+                result[outcome]++;
             consecutiveFailures = outcome === 'failed' ? consecutiveFailures + 1 : 0;
             if (outcome === 'eligible')
                 missing--;
@@ -141,7 +117,7 @@ export async function verifyPendingForReviewDay(input, reviewDay, now, rosterRem
         .get();
     let needByAgent = rosterRemaining;
     if (!needByAgent) {
-        const used = new Map(samplingInput(input.db, new Date(reviewDay.start)).monthlyTaskCounts.map((row) => [
+        const used = new Map(monthlyAutomaticTaskCounts(input.db, new Date(reviewDay.start)).map((row) => [
             row.agentId,
             row.automaticOpenCount + row.automaticCompletedCount,
         ]));
@@ -161,6 +137,7 @@ export async function verifyPendingForReviewDay(input, reviewDay, now, rosterRem
         source: input.source,
         day: reviewDay,
         needByAgent,
+        deliveryDate: input.deliveryDate,
         minClientMessages: policy.min_client_messages,
         minAgentMessages: policy.min_agent_messages,
         clock: input.clock ?? (() => now),

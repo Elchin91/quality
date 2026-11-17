@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { sharedLeadInboxSql } from './appeals/leadRouting.js';
 export function unfinishedWork(db, user) {
     const count = (sql, ...args) => db.prepare(sql).get(...args).count;
     const result = { chat_reviews: 0, call_reviews: 0, complaints: 0, appeals: 0 };
@@ -18,7 +19,7 @@ export function unfinishedWork(db, user) {
                 : count("SELECT COUNT(*) AS count FROM appeals WHERE status='pending_review' AND assigned_reviewer_id=?", user.id);
     }
     else if (user.role === 'team_lead') {
-        result.appeals = count("SELECT COUNT(*) AS count FROM appeals WHERE status='pending_lead' AND required_team_lead_user_id=?", user.id);
+        result.appeals = count(`SELECT COUNT(*) AS count FROM appeals p WHERE ${sharedLeadInboxSql}`);
     }
     else if (user.agent_id) {
         result.appeals = count('SELECT COUNT(*) AS count FROM appeals WHERE agent_id=? AND resolved_at IS NULL', user.agent_id);

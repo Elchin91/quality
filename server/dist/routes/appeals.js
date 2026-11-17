@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { db } from '../db.js';
 import { requireAgent, requireRole } from '../auth.js';
 import { AppealService } from '../appeals/service.js';
+import { sharedLeadInboxSql } from '../appeals/leadRouting.js';
 import { APPEAL_STATUSES, AppealError } from '../appeals/types.js';
 import { serializeAdminAppeal, serializeAgentAppeal, serializeLeadAppeal, serializeReviewerAppeal, } from '../appeals/serialization.js';
 import { resolveEvaluationEvidence } from '../chatQa/service.js';
@@ -95,10 +96,9 @@ appealsRouter.get('/me/appeals/:id', requireAgent, (req, res) => {
             : null,
     });
 });
-appealsRouter.get('/appeals/lead-inbox', requireRole('team_lead'), (req, res) => {
+appealsRouter.get('/appeals/lead-inbox', requireRole('team_lead'), (_req, res) => {
     res.json({
-        items: list(`SELECT * FROM appeals WHERE required_team_lead_user_id=? AND status='pending_lead'
-    ORDER BY created_at`, [req.user.id]).map((row) => serializeLeadAppeal(row, evidence(row))),
+        items: list(`SELECT p.* FROM appeals p WHERE ${sharedLeadInboxSql} ORDER BY p.created_at,p.id`).map((row) => serializeLeadAppeal(row, evidence(row))),
     });
 });
 appealsRouter.post('/appeals/:id/lead-decision', requireRole('team_lead'), (req, res) => {
