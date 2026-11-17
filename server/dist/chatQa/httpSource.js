@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { logger } from '../logger.js';
 import { CallsChatHttpTransport } from './httpTransport.js';
-import { candidate, isIsolatedHttpRequest, isIsolatedSearchRow, httpDate, identity, parse, parseMessages, parseRequest, searchCandidate, searchCatalogRowSchema, searchRowSchema, sessionKey, } from './httpContract.js';
+import { candidate, contactFromMatchingDetail, isIsolatedHttpRequest, isIsolatedSearchRow, httpDate, identity, parse, parseMessages, parseRequest, searchCandidate, searchCatalogRowSchema, searchRowSchema, sessionKey, } from './httpContract.js';
 import { SourceDiagnosticError, sourceDiagnosticFromError, sourceFailureAtStage, } from './sourceDiagnostics.js';
 import { normalizeConversation } from './normalize.js';
 import { CATALOG_LIMITS, splitCatalogWindow } from './sourceCatalog.js';
@@ -90,6 +90,7 @@ export class HttpChatSourceClient {
             throw new SourceDiagnosticError('source_window_invalid');
         }
         const rows = [];
+        const missingContacts = [];
         const seen = new Set();
         const sessions = new Set();
         let examined = 0;
@@ -159,7 +160,10 @@ export class HttpChatSourceClient {
                         continue;
                     }
                     try {
-                        rows.push(searchCandidate(row.data, key));
+                        const candidate = searchCandidate(row.data, key);
+                        rows.push(candidate);
+                        if (row.data.requestSource.chat.channelId === null)
+                            missingContacts.push({ candidate, search: row.data });
                         sessions.add(key);
                     }
                     catch {
@@ -174,8 +178,19 @@ export class HttpChatSourceClient {
             }
         }
         this.lastCatalogAnomalies = anomalies;
-        if (anomalies > Math.max(MIN_ANOMALY_BUDGET, Math.ceil(examined * MAX_ANOMALY_SHARE)))
+        // Bound exact-detail reads by the same anomaly ceiling as the rest of the source contract.
+        if (anomalies + missingContacts.length >
+            Math.max(MIN_ANOMALY_BUDGET, Math.ceil(examined * MAX_ANOMALY_SHARE)))
             throw new SourceDiagnosticError('source_schema_invalid');
+        await mapWithConcurrency(missingContacts, this.options.concurrency, async ({ candidate, search }) => {
+            const raw = await this.transport.request('GET', `/api/profile/request/requestById?requestId=${search.id}`, undefined, signal);
+            candidate.customerContact = contactFromMatchingDetail(raw, search);
+            if (candidate.customerContact === null) {
+                candidate.sourceIdentityIncomplete = true;
+                anomalies++;
+            }
+        }, signal);
+        this.lastCatalogAnomalies = anomalies;
         if (anomalies)
             logger.warn({ anomalies, examined }, 'chat source rows quarantined');
         return rows;

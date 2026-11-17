@@ -117,7 +117,9 @@ function sourceReasons(requests, latest) {
     })) {
         reasons.push('unsupported_channel');
     }
-    if (requests.some((request) => request.requestType !== 'in' || !isApprovedChatQueueName(request.queueName)) ||
+    if (requests.some((request) => request.sourceIdentityIncomplete ||
+        request.requestType !== 'in' ||
+        !isApprovedChatQueueName(request.queueName)) ||
         !isApprovedChatCatalogSeed(latest)) {
         reasons.push('source_incomplete');
     }

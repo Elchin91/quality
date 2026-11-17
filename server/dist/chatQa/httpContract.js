@@ -9,6 +9,11 @@ const uuid = z
     .transform((s) => s.toLowerCase());
 const text = z.string().max(16_384).nullable();
 const optionalShort = short.nullable();
+const searchChat = z.object({
+    conversationId: numericId,
+    channelId: short.nullable(),
+    forwarded: z.boolean(),
+});
 export const searchRowSchema = z.object({
     id: uuid,
     completeDate: short,
@@ -17,9 +22,7 @@ export const searchRowSchema = z.object({
     communicationType: optionalShort,
     queueName: optionalShort,
     requestSource: z.object({
-        chat: z
-            .object({ conversationId: numericId, channelId: short, forwarded: z.boolean() })
-            .nullable(),
+        chat: searchChat.nullable(),
     }),
 });
 /** Search rows already carry the agent, topics and transfer links used by the catalog. */
@@ -35,7 +38,7 @@ export const searchCatalogRowSchema = searchRowSchema.extend({
     parent: z.unknown().nullable().optional(),
     linkedRequests: z.unknown().nullable().optional(),
 });
-const requestSchema = searchRowSchema.extend({
+const catalogDetailSchema = searchRowSchema.extend({
     createdDate: short,
     agent: z.object({ userId: numericId, firstName: short, lastName: short }).nullable(),
     classifiers: z
@@ -49,6 +52,10 @@ const requestSchema = searchRowSchema.extend({
         .max(100),
     parent: z.unknown().nullable(),
     linkedRequests: z.unknown().nullable(),
+});
+// Loading messages always needs a positively identified customer channel.
+const requestSchema = catalogDetailSchema.extend({
+    requestSource: z.object({ chat: searchChat.extend({ channelId: short }).nullable() }),
 });
 const messageSchema = z.object({
     id: numericId,
@@ -104,6 +111,26 @@ export function parseRequest(raw, expectedId) {
     identity(r.requestSource.chat !== null);
     identity(httpDate(r.createdDate).getTime() <= httpDate(r.completeDate).getTime());
     return r;
+}
+/** A search row can omit the customer channel. Recover only from the same isolated request. */
+export function contactFromMatchingDetail(raw, row) {
+    const detail = parse(catalogDetailSchema, raw);
+    const chat = detail.requestSource.chat;
+    identity(detail.id === row.id &&
+        chat !== null &&
+        chat.conversationId === row.requestSource.chat?.conversationId &&
+        !chat.forwarded &&
+        detail.parent == null &&
+        (detail.linkedRequests == null ||
+            (Array.isArray(detail.linkedRequests) && !detail.linkedRequests.length)) &&
+        detail.status === row.status &&
+        detail.type === row.type &&
+        detail.queueName === row.queueName &&
+        detail.communicationType === row.communicationType &&
+        detail.createdDate === row.createdDate &&
+        detail.completeDate === row.completeDate &&
+        (detail.agent?.userId ?? null) === (row.agentId ?? null));
+    return chat.channelId;
 }
 export function candidate(r, key) {
     return {
