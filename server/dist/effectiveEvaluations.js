@@ -29,15 +29,12 @@ function addRepeatedFilter(conditions, args, expression, values) {
     args.push(...values);
 }
 /** Match the normalized values exposed by analytics filter options and breakdowns. */
-export function metadataDimensionSql(key, alias = 'e', resolveReviewerName = false) {
+export function metadataDimensionSql(key, alias = 'e') {
     const metadata = `CASE WHEN json_valid(${alias}.source_metadata_json) THEN ${alias}.source_metadata_json ELSE '{}' END`;
     const value = `json_extract(${metadata}, '$.${key}')`;
     const whitespace = 'char(9,10,11,12,13,32,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279)';
     const label = `CASE WHEN typeof(${value})='text' THEN NULLIF(TRIM(${value}, ${whitespace}), '') END`;
-    const evaluator = key === 'reviewer' && resolveReviewerName
-        ? `(SELECT NULLIF(TRIM(reviewer_directory.name, ${whitespace}), '') FROM users reviewer_directory WHERE reviewer_directory.id=${alias}.evaluator_id)`
-        : 'NULL';
-    return `COALESCE(${label}, ${evaluator}, '__unknown__')`;
+    return `COALESCE(${label}, '__unknown__')`;
 }
 export function buildEffectiveEvaluationWhere(filters, alias = 'e', revisionAlias = 'er') {
     const conditions = [];
@@ -54,7 +51,9 @@ export function buildEffectiveEvaluationWhere(filters, alias = 'e', revisionAlia
     }
     addRepeatedFilter(conditions, args, `${alias}.agent_id`, filters.agentIds);
     addRepeatedFilter(conditions, args, metadataDimensionSql('team_leader', alias), filters.teamLeaders);
-    addRepeatedFilter(conditions, args, metadataDimensionSql('reviewer', alias, filters.resolveReviewerName), filters.reviewers);
+    addRepeatedFilter(conditions, args, filters.reviewerIdentity?.keySql(alias) ?? metadataDimensionSql('reviewer', alias), filters.reviewerIdentity && filters.reviewers
+        ? filters.reviewerIdentity.filterKeys(filters.reviewers)
+        : filters.reviewers);
     addRepeatedFilter(conditions, args, metadataDimensionSql('classifier', alias), filters.classifiers);
     if (filters.scoreMin !== undefined) {
         conditions.push(`${effectiveScore} >= ?`);

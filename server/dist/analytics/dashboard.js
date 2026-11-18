@@ -1,5 +1,6 @@
+import { reviewerIdentity } from './reviewerIdentity.js';
 import { criteriaKeysFor, isQaV2Kind } from '../prompts/scorecardRegistry.js';
-import { buildEffectiveEvaluationWhere, businessDateSql, effectiveCriteriaSql, effectiveScoreSql, metadataDimensionSql, } from '../effectiveEvaluations.js';
+import { buildEffectiveEvaluationWhere, businessDateSql, effectiveCriteriaSql, effectiveScoreSql, } from '../effectiveEvaluations.js';
 import { periodKey } from './filters.js';
 import { andWhere, hasCriticalViolation, SCORECARD_KIND_ORDER, scorecardFilterSql, scorecardKindSql, toScorecardKind, } from './scorecardFilter.js';
 const UNKNOWN = '__unknown__';
@@ -15,18 +16,10 @@ function metadata(row) {
     }
 }
 function dimension(row, key) {
-    if (key === 'reviewer' && row.reviewer_name)
-        return row.reviewer_name;
     const value = metadata(row)[key];
     return typeof value === 'string' && value.trim() ? value.trim() : UNKNOWN;
 }
-/** Older analytical fixtures/exports may not contain the live user directory. */
-function hasReviewerDirectory(database) {
-    const columns = (table) => new Set(database.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name));
-    const users = columns('users');
-    return users.has('id') && users.has('name') && columns('evaluations').has('evaluator_id');
-}
-function loadRows(database, filters, previous = false) {
+function loadRows(database, filters, identity, previous = false) {
     let from = filters.from;
     let to = filters.to;
     if (previous && filters.fromMs !== undefined && filters.toExclusiveMs !== undefined) {
@@ -40,7 +33,7 @@ function loadRows(database, filters, previous = false) {
         agentIds: filters.agentIds,
         teamLeaders: filters.teamLeaders,
         reviewers: filters.reviewers,
-        resolveReviewerName: hasReviewerDirectory(database),
+        reviewerIdentity: identity,
         classifiers: filters.classifiers,
     });
     const hasAppeals = Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='appeals'").get());
@@ -52,7 +45,7 @@ function loadRows(database, filters, previous = false) {
     const whereSql = andWhere(where.sql, scorecardFilterSql(filters.scorecard, 'e', criteria));
     const rows = database
         .prepare(`SELECT e.id, e.agent_id, a.name AS agent_name, ${score} AS score,
-              ${metadataDimensionSql('reviewer', 'e', hasReviewerDirectory(database))} AS reviewer_name,
+              ${identity.keySql()} AS reviewer_key,
               ${criteria} AS criteria_json, e.source_metadata_json, e.created_at,
               ${businessDateSql()} AS business_date,
               ${scorecardKindSql('e', criteria)} AS scorecard
@@ -64,12 +57,12 @@ function loadRows(database, filters, previous = false) {
         .all(...where.args);
     return rows.map((row) => ({ ...row, scorecard: toScorecardKind(row.scorecard) }));
 }
-function unknownContactCount(database, filters) {
+function unknownContactCount(database, filters, identity) {
     const where = buildEffectiveEvaluationWhere({
         agentIds: filters.agentIds,
         teamLeaders: filters.teamLeaders,
         reviewers: filters.reviewers,
-        resolveReviewerName: hasReviewerDirectory(database),
+        reviewerIdentity: identity,
         classifiers: filters.classifiers,
     });
     const hasRevisions = Boolean(database
@@ -133,16 +126,20 @@ function criteriaSections(rows) {
 function criticalViolations(rows) {
     return rows.filter((row) => hasCriticalViolation(row.scorecard, parseCriteria(row))).length;
 }
-function breakdown(rows, getKey) {
+function breakdown(rows, getKey, labelForKey = (key) => (key === UNKNOWN ? 'Unknown' : key)) {
     const groups = new Map();
     for (const row of rows) {
         const key = getKey(row);
-        groups.set(key, [...(groups.get(key) ?? []), row]);
+        const group = groups.get(key);
+        if (group)
+            group.push(row);
+        else
+            groups.set(key, [row]);
     }
     return [...groups.entries()]
         .map(([key, values]) => ({
         key,
-        label: key === UNKNOWN ? 'Unknown' : key,
+        label: labelForKey(key),
         count: values.length,
         average_score: average(values),
         below_60_count: values.filter((row) => row.score < 60).length,
@@ -192,14 +189,19 @@ function trend(rows, previous, bucket, shift) {
     }))
         .sort((a, b) => a.period.localeCompare(b.period));
 }
-function filterOptions(database) {
+function filterOptions(database, identity, scorecard) {
     const agents = database
         .prepare('SELECT id, name AS label FROM agents ORDER BY name COLLATE NOCASE')
         .all();
+    const revisions = scorecard !== 'all' &&
+        Boolean(database
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='evaluation_revisions'")
+            .get());
+    const includeReviewer = scorecardFilterSql(scorecard, 'e', revisions ? effectiveCriteriaSql() : 'e.criteria_json');
     const rows = database
-        .prepare(`SELECT e.source_metadata_json,
-    ${metadataDimensionSql('reviewer', 'e', hasReviewerDirectory(database))} AS reviewer_name
-    FROM evaluations e`)
+        .prepare(`SELECT e.source_metadata_json, ${identity.keySql()} AS reviewer_key,
+    ${includeReviewer ?? '1'} AS include_reviewer FROM evaluations e
+    ${revisions ? 'LEFT JOIN evaluation_revisions er ON er.evaluation_id=e.id' : ''}`)
         .all();
     const values = (key) => [...new Set(rows.map((row) => dimension(row, key)))]
         .sort((a, b) => a.localeCompare(b))
@@ -207,15 +209,20 @@ function filterOptions(database) {
     return {
         agents,
         team_leaders: values('team_leader'),
-        reviewers: values('reviewer'),
+        reviewers: [
+            ...new Set(rows.filter((row) => row.include_reviewer).map((row) => row.reviewer_key)),
+        ]
+            .map((value) => ({ value, label: identity.labelForKey(value) }))
+            .sort((a, b) => a.label.localeCompare(b.label)),
         classifiers: values('classifier'),
     };
 }
 export function buildAnalyticsDashboard(database, filters) {
-    const rows = loadRows(database, filters);
-    const unknownContactDateCount = unknownContactCount(database, filters);
+    const identity = reviewerIdentity(database);
+    const rows = loadRows(database, filters, identity);
+    const unknownContactDateCount = unknownContactCount(database, filters, identity);
     const canCompare = filters.fromMs !== undefined && filters.toExclusiveMs !== undefined;
-    const previous = canCompare ? loadRows(database, filters, true) : [];
+    const previous = canCompare ? loadRows(database, filters, identity, true) : [];
     const currentAverage = average(rows);
     const previousAverage = average(previous);
     const duration = canCompare && filters.fromMs !== undefined && filters.toExclusiveMs !== undefined
@@ -234,13 +241,13 @@ export function buildAnalyticsDashboard(database, filters) {
     return {
         unknown_contact_date_count: unknownContactDateCount,
         period_basis: 'contact',
-        filters: filterOptions(database),
+        filters: filterOptions(database, identity, filters.scorecard),
         applied_filters: {
             from: filters.from ?? null,
             to: filters.to ?? null,
             agent_id: filters.agentIds,
             team_leader: filters.teamLeaders,
-            reviewer: filters.reviewers,
+            reviewer: identity.filterKeys(filters.reviewers),
             classifier: filters.classifiers,
             bucket: filters.bucket,
             scorecard: filters.scorecard,
@@ -273,7 +280,7 @@ export function buildAnalyticsDashboard(database, filters) {
         criteria,
         agent_breakdown: agentBreakdown(database, rows, filters.agentIds),
         team_leader_breakdown: breakdown(rows, (row) => dimension(row, 'team_leader')),
-        reviewer_breakdown: breakdown(rows, (row) => dimension(row, 'reviewer')),
+        reviewer_breakdown: breakdown(rows, (row) => row.reviewer_key, identity.labelForKey),
         classifier_breakdown: breakdown(rows, (row) => dimension(row, 'classifier')),
     };
 }

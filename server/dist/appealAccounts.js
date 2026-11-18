@@ -40,3 +40,7 @@ export const APPEAL_ACCOUNTS = [
     { name: 'Ayyub Salmanov', email: 'ayyub.salmanov@pashapay.az', role: 'reviewer', aliases: [] },
     { name: 'Senan Namazov', email: 'senan.namazov@pashapay.az', role: 'reviewer', aliases: [] },
 ];
+/** Additional historical signatures confirmed for reporting. */
+export const ANALYTICS_REVIEWER_ALIASES = {
+    'senan.namazov@pashapay.az': ['Sanan'],
+};

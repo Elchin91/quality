@@ -14,6 +14,7 @@ import { asyncHandler } from '../asyncHandler.js';
 import { decodeAdminEvaluation } from '../evaluationSerialization.js';
 import { buildEffectiveEvaluationWhere, effectiveEvaluationProjection, effectiveCriteriaSql, businessDateSql, } from '../effectiveEvaluations.js';
 import { scorecardFilterShape, scorecardFilterSql } from '../analytics/scorecardFilter.js';
+import { reviewerIdentity } from '../analytics/reviewerIdentity.js';
 export const scorecardRequestSchema = z
     .object({
     text: z.string().min(1).optional(),
@@ -194,13 +195,14 @@ scorecardRouter.get('/evaluations', (req, res) => {
     if (!parsedQuery.success)
         return res.status(400).json({ error: 'invalid query' });
     const { scorecard, from, to, agent_id, team_leader, reviewer, classifier, score_min, score_max, type, limit: lim, offset: off, } = parsedQuery.data;
+    const identity = reviewerIdentity(db);
     const filters = buildEffectiveEvaluationWhere({
         from,
         to,
         agentIds: agent_id,
         teamLeaders: team_leader,
         reviewers: reviewer,
-        resolveReviewerName: true,
+        reviewerIdentity: identity,
         classifiers: classifier,
         scoreMin: score_min,
         scoreMax: score_max,
@@ -220,11 +222,10 @@ scorecardRouter.get('/evaluations', (req, res) => {
         .prepare(`SELECT COUNT(*) AS n FROM evaluations e ${projection.joins} ${where}`)
         .get(...args).n;
     const rows = db
-        .prepare(`SELECT ${projection.select}, ${businessDateSql()} AS business_date, a.name as agent_name, evaluator.name as evaluator_name
+        .prepare(`SELECT ${projection.select}, ${businessDateSql()} AS business_date, a.name as agent_name, ${identity.labelSql('e')} AS evaluator_name
          FROM evaluations e
          ${projection.joins}
          LEFT JOIN agents a ON a.id = e.agent_id
-         LEFT JOIN users evaluator ON evaluator.id = e.evaluator_id
          ${where}
          ORDER BY e.created_at DESC, e.id DESC
          LIMIT ${lim} OFFSET ${off}`)
@@ -232,11 +233,11 @@ scorecardRouter.get('/evaluations', (req, res) => {
     res.json({ total, limit: lim, offset: off, items: rows.map(decodeAdminEvaluation) });
 });
 scorecardRouter.get('/evaluations/:id', (req, res) => {
+    const identity = reviewerIdentity(db);
     const row = db
-        .prepare(`SELECT e.*, a.name as agent_name, evaluator.name as evaluator_name
+        .prepare(`SELECT e.*, a.name as agent_name, ${identity.labelSql('e')} AS evaluator_name
          FROM evaluations e
          LEFT JOIN agents a ON a.id = e.agent_id
-         LEFT JOIN users evaluator ON evaluator.id = e.evaluator_id
          WHERE e.id = ?`)
         .get(req.params.id);
     if (!row)
