@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { activeTeamLeads, selectedTeamLead } from './access.js';
 import { parseAnalyticsFilters } from '../analytics/filters.js';
+import { evaluationOrderFields } from '../evaluationListOrdering.js';
 import { teamDashboard, teamEvaluation, teamEvaluations, teamMemberships, setTeamMembership, } from './service.js';
 const id = z.string().min(1).max(200);
 const querySchema = z
@@ -15,6 +16,10 @@ const querySchema = z
     offset: z.coerce.number().int().min(0).max(1000000).default(0),
 })
     .strict();
+const evaluationQuery = querySchema.extend({
+    ...evaluationOrderFields,
+    sort_by: z.enum(['business_date', 'agent_name', 'score', 'type']).optional(),
+});
 export function createTeamRouter(db) {
     const router = Router();
     const requireRole = (role) => (req, res, next) => {
@@ -50,7 +55,7 @@ export function createTeamRouter(db) {
         res.json(teamDashboard(db, scope, parsed.data));
     });
     router.get('/team/evaluations', lead, (req, res) => {
-        const parsed = querySchema.safeParse(req.query);
+        const parsed = evaluationQuery.safeParse(req.query);
         if (!parsed.success)
             return res.status(400).json({ error: 'invalid query' });
         try {

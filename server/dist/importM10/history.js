@@ -3,6 +3,7 @@ import { normalizeAlias } from '../appeals/assignment.js';
 import { businessDateSql, effectiveEvaluationProjection } from '../effectiveEvaluations.js';
 import { decodeAgentEvaluation } from '../evaluationSerialization.js';
 import { historicalEvaluationContact } from '../contactContext/evaluationContact.js';
+import { evaluationListOrdering } from '../evaluationListOrdering.js';
 export function historyActor(db, id) {
     return db
         .prepare(`SELECT id,role,agent_id FROM users WHERE id=? AND active=1
@@ -79,11 +80,12 @@ export function historicalRows(db, actor, filters = {}) {
         ? projection.select
         : `e.id,e.agent_id,e.evaluator_id,e.source_metadata_json,
        COALESCE(er.new_score,e.score) AS score,CASE WHEN er.id IS NULL THEN 0 ELSE 1 END AS has_revision`;
+    const order = evaluationListOrdering(db, filters);
     const rows = db
-        .prepare(`SELECT ${select},a.name AS agent_name,${businessDateSql()} AS business_date
-    FROM evaluations e JOIN agents a ON a.id=e.agent_id ${projection.joins}
-    WHERE ${conditions.join(' AND ')} ORDER BY business_date DESC,e.created_at DESC,e.id DESC`)
-        .all(...args);
+        .prepare(`${order.prefix} SELECT ${select},a.name AS agent_name,${businessDateSql()} AS business_date
+    FROM evaluations e JOIN agents a ON a.id=e.agent_id ${projection.joins} ${order.join}
+    WHERE ${conditions.join(' AND ')} ORDER BY ${order.by}`)
+        .all(...order.args, ...args);
     if (actor.role === 'admin')
         return rows;
     if (actor.role === 'agent')

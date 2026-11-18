@@ -1,9 +1,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { tableOrderBy } from '../qaTableOrdering.js';
 import { createStaffAuditSchema } from './staffAudit.js';
 import { configuredDefaultCapacity, reviewerReadinessMap, } from '../reviewerAssignment/repository.js';
 export const staffQuerySchema = z
     .object({
+    sort_by: z.enum(['name', 'email', 'role', 'status', 'lead']).optional(),
+    sort_direction: z.enum(['asc', 'desc']).optional(),
     search: z.string().trim().max(128).default(''),
     role: z.enum(['admin', 'reviewer', 'agent', 'team_lead']).optional(),
     status: z.enum(['active', 'inactive', 'no_account']).optional(),
@@ -49,8 +52,15 @@ export function listStaff(db, input) {
         .prepare(`${projection} SELECT COUNT(*) FROM staff ${where}`)
         .pluck()
         .get(...args);
+    const order = tableOrderBy(input, {
+        name: "NULLIF(TRIM(name),'') COLLATE NOCASE",
+        email: "NULLIF(TRIM(email),'') COLLATE NOCASE",
+        role: 'role COLLATE NOCASE',
+        status: "CASE WHEN user_id IS NULL THEN 'no_account' WHEN active=1 THEN 'active' ELSE 'inactive' END",
+        lead: "NULLIF(TRIM(team_lead_name),'') COLLATE NOCASE",
+    }, 'name COLLATE NOCASE,id', 'id');
     const rows = db
-        .prepare(`${projection} SELECT * FROM staff ${where} ORDER BY name COLLATE NOCASE,id LIMIT ? OFFSET ?`)
+        .prepare(`${projection} SELECT * FROM staff ${where} ORDER BY ${order} LIMIT ? OFFSET ?`)
         .all(...args, input.limit, (input.page - 1) * input.limit);
     const leads = db
         .prepare("SELECT id,name FROM users WHERE role='team_lead' AND active=1 ORDER BY name COLLATE NOCASE,id")

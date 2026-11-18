@@ -1,4 +1,5 @@
 import { businessDateSql, effectiveEvaluationProjection } from '../effectiveEvaluations.js';
+import { evaluationListOrdering } from '../evaluationListOrdering.js';
 import { decodeAgentEvaluation } from '../evaluationSerialization.js';
 import { historicalTeamAssignments } from './history.js';
 import { teamCallMaterial } from './materials.js';
@@ -109,11 +110,12 @@ export function teamEvaluations(db, userId, filters, limit, offset) {
     const where = teamWhere(userId, filters);
     const projection = effectiveEvaluationProjection();
     const total = db.prepare(`SELECT COUNT(*) n FROM evaluations e WHERE ${where.sql}`).get(...where.args).n;
+    const order = evaluationListOrdering(db, filters);
     const rows = db
-        .prepare(`SELECT ${projection.select}, a.name AS agent_name, ${businessDateSql()} AS business_date
-    FROM evaluations e JOIN agents a ON a.id=e.agent_id ${projection.joins}
-    WHERE ${where.sql} ORDER BY business_date DESC,e.created_at DESC,e.id DESC LIMIT ? OFFSET ?`)
-        .all(...where.args, limit, offset);
+        .prepare(`${order.prefix} SELECT ${projection.select}, a.name AS agent_name, ${businessDateSql()} AS business_date
+    FROM evaluations e JOIN agents a ON a.id=e.agent_id ${projection.joins} ${order.join}
+    WHERE ${where.sql} ORDER BY ${order.by} LIMIT ? OFFSET ?`)
+        .all(...order.args, ...where.args, limit, offset);
     const resolveContact = createEvaluationContactResolver(db);
     return {
         total,

@@ -52,6 +52,7 @@ export function createCallQaAdminRouter(options) {
                 actorUserId: actor(req),
                 page: query.page,
                 pageSize: query.page_size,
+                ...(query.sort_by ? { sort_by: query.sort_by, sort_direction: query.sort_direction } : {}),
                 ...(query.task_id ? { taskId: query.task_id } : {}),
                 ...(query.baku_date ? { bakuDate: query.baku_date } : {}),
                 ...(query.agent_id ? { agentId: query.agent_id } : {}),

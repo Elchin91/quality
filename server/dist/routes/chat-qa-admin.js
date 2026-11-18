@@ -1,3 +1,4 @@
+import { runColumns, mappingColumns, taskColumns, interactionColumns, sortQueryShape } from '../qaAdminTableOrders.js';
 import { Router } from 'express';
 import { z } from 'zod';
 import { AgentMappingService } from '../chatQa/mappings.js';
@@ -9,7 +10,8 @@ import { asyncRoute, calendarDate, idSchema, invalid, paginationShape, parseBody
 import { getPolicy, interactionDetail, listAdminTasks, listInteractions, listMappings, listSyncRuns, policyDto, } from '../chatQa/httpQueries.js';
 import { QaPolicyRepository } from '../qaPolicies/repository.js';
 import { enqueueManualChatSync, getManualChatSync } from '../chatQa/manualSync.js';
-const pageQuery = z.object(paginationShape).strict();
+const runPageQuery = z.object({ ...paginationShape, ...sortQueryShape(runColumns) }).strict();
+const mappingPageQuery = z.object({ ...paginationShape, ...sortQueryShape(mappingColumns) }).strict();
 const boundedFilter = z.string().trim().min(1).max(256);
 const repeated = (schema) => z.preprocess((value) => (Array.isArray(value) ? value : [value]), z.array(schema).min(1).max(50));
 const INTERACTION_REPEATED_FILTERS = new Set([
@@ -35,6 +37,7 @@ const countText = z
     .pipe(z.number().int().min(0).max(1_000_000));
 const interactionQuery = z
     .object({
+    ...sortQueryShape(interactionColumns),
     ...paginationShape,
     from: calendarDate.optional(),
     to: calendarDate.optional(),
@@ -72,6 +75,7 @@ const interactionQuery = z
 });
 const taskQuery = z
     .object({
+    ...sortQueryShape(taskColumns),
     ...paginationShape,
     task_id: idSchema.optional(),
     status: repeated(z.enum(['assigned', 'in_progress', 'completed', 'cancelled'])).optional(),
@@ -200,7 +204,7 @@ export function createChatQaAdminRouter(dependencies) {
         res.set('Cache-Control', 'private, no-store').json(operation);
     });
     router.get('/admin/chat-source/runs', (req, res) => {
-        const query = parseQuery(pageQuery, req);
+        const query = parseQuery(runPageQuery, req);
         if (!query)
             return invalid(res);
         try {
@@ -236,7 +240,7 @@ export function createChatQaAdminRouter(dependencies) {
         }
     });
     router.get('/admin/chat-agent-mappings', (req, res) => {
-        const query = parseQuery(pageQuery, req);
+        const query = parseQuery(mappingPageQuery, req);
         if (!query)
             return invalid(res);
         try {

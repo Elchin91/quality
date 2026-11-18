@@ -1,3 +1,5 @@
+import { tableOrderBy } from '../qaTableOrdering.js';
+import { callCatalogColumns } from '../qaAdminTableOrders.js';
 import { storedEndedBy } from './queries.js';
 const DATE = /^\d{4}-\d{2}-\d{2}$/u;
 // eslint-disable-next-line no-control-regex -- rejects C0/DEL in SQL filter values
@@ -129,7 +131,7 @@ export function listCallCatalog(db, query) {
          ON confirmed_mapping.external_agent_id=records.external_agent_id
         AND confirmed_mapping.agent_id=records.agent_id
        ${where.sql}
-       ORDER BY records.call_started_at_utc DESC,records.id ASC LIMIT ? OFFSET ?`)
+       ORDER BY ${tableOrderBy(query, callCatalogColumns, 'records.call_started_at_utc DESC,records.id ASC', 'records.id')} LIMIT ? OFFSET ?`)
         .all(...where.params, query.pageSize, (query.page - 1) * query.pageSize);
     return {
         page: query.page,

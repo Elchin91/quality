@@ -1,3 +1,4 @@
+import { callCatalogColumns, sortQueryShape } from '../qaAdminTableOrders.js';
 import { aiReviewShape } from '../aiEvaluation/review.js';
 import { pipeline } from 'node:stream/promises';
 import { types as nodeTypes } from 'node:util';
@@ -65,6 +66,7 @@ export const syncBody = z
     .refine(({ from, to }) => from <= to && inclusiveDays(from, to) <= 31);
 export const catalogQuery = z
     .object({
+    ...sortQueryShape(callCatalogColumns),
     page: integerText.transform(Number).pipe(z.number().int().min(1).max(10_000)).default('1'),
     page_size: integerText.transform(Number).pipe(z.number().int().min(1).max(100)).default('50'),
     task_id: callQaId.optional(),

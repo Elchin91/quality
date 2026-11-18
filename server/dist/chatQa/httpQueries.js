@@ -1,3 +1,6 @@
+import { tableOrderBy } from '../qaTableOrdering.js';
+import { taskColumns, interactionColumns } from '../qaAdminTableOrders.js';
+import { taskWorkloadJoin } from './adminTableQueries.js';
 import { readRunFields } from '../aiEvaluation/persistence.js';
 import { pageResult, parseJson, safeClassifiers, safeTranscript } from './http.js';
 import { participantCandidates } from './adminMetadata.js';
@@ -5,8 +8,8 @@ import { sanitizeReviewerActivityReason } from './evidenceSecurity.js';
 import { effectiveTranscriptJson } from './retention.js';
 import { chatAiDraftStatus } from './aiDraft.js';
 import { retainedTranscriptInterval } from './schema.js';
-import { sourceFailureDetailsDto } from './sourceFailureDetails.js';
 import { configuredDefaultCapacity, reviewerReadiness, reviewerReadinessMap, } from '../reviewerAssignment/repository.js';
+export { listSyncRuns, listMappings } from './adminTableQueries.js';
 function add(filters, args, clause, value) {
     if (value !== undefined) {
         filters.push(clause);
@@ -29,18 +32,6 @@ function addJsonMany(filters, args, column, values) {
 }
 function jsonList(value) {
     return parseJson(value, []);
-}
-export function listSyncRuns(db, page) {
-    const offset = (page.page - 1) * page.page_size;
-    const items = db
-        .prepare(`SELECT id,mode,status,window_from,window_to,started_at,completed_at,requests_seen,
-       conversations_seen,eligible_count,excluded_count,proposed_mapping_count,
-       proposed_task_count,error_code,error_message,error_details_json
-       FROM chat_sync_runs ORDER BY started_at DESC,id DESC LIMIT ? OFFSET ?`)
-        .all(page.page_size, offset);
-    const total = db.prepare('SELECT COUNT(*) count FROM chat_sync_runs').get()
-        .count;
-    return pageResult(items.map(sourceFailureDetailsDto), total, page.page, page.page_size);
 }
 function interactionDto(db, row) {
     return {
@@ -122,7 +113,7 @@ export function listInteractions(db, input) {
        si.agent_message_count,si.attachment_count,si.eligibility_state,
        si.exclusion_reasons_json,si.external_agent_ids_json,qt.id task_id,qt.status task_status,
        qt.reviewer_user_id,reviewer.name reviewer_name,qt.deadline_at
-       ${from} ORDER BY si.completed_at_utc DESC,si.id DESC LIMIT ? OFFSET ?`)
+       ${from} ORDER BY ${tableOrderBy(input, interactionColumns, 'si.completed_at_utc DESC,si.id DESC', 'si.id')} LIMIT ? OFFSET ?`)
         .all(...args, input.page_size, offset);
     return pageResult(rows.map((row) => interactionDto(db, row)), total, input.page, input.page_size);
 }
@@ -157,19 +148,6 @@ export function interactionDetail(db, id, now = Date.now()) {
         transcript: safeTranscript(typeof row.task_id === 'string' ? effectiveTranscriptJson(db, row.task_id, now) : null),
         events,
     };
-}
-export function listMappings(db, page) {
-    const offset = (page.page - 1) * page.page_size;
-    const items = db
-        .prepare(`SELECT mappings.id,mappings.source_system,mappings.external_agent_id,mappings.agent_id,
-       mappings.source_email,mappings.source_name,mappings.status,mappings.confirmed_by_user_id,
-       mappings.confirmed_at,mappings.created_at,mappings.updated_at,agents.name agent_name
-       FROM external_agent_mappings mappings LEFT JOIN agents ON agents.id=mappings.agent_id
-       ORDER BY CASE WHEN mappings.status='suggested' THEN 0 ELSE 1 END,
-                mappings.updated_at DESC,mappings.id LIMIT ? OFFSET ?`)
-        .all(page.page_size, offset);
-    const total = db.prepare('SELECT COUNT(*) count FROM external_agent_mappings').get().count;
-    return pageResult(items, total, page.page, page.page_size);
 }
 export function policyDto(row) {
     return {
@@ -243,16 +221,16 @@ export function listAdminTasks(db, input, now) {
         args.push(now);
     }
     const from = `FROM chat_qa_tasks tasks JOIN source_interactions si ON si.id=tasks.interaction_id
-    JOIN agents ON agents.id=tasks.agent_id JOIN users reviewer ON reviewer.id=tasks.reviewer_user_id
-    WHERE ${filters.join(' AND ')}`;
-    const total = db.prepare(`SELECT COUNT(*) count ${from}`).get(...args)
+    JOIN agents ON agents.id=tasks.agent_id JOIN users reviewer ON reviewer.id=tasks.reviewer_user_id`;
+    const where = `WHERE ${filters.join(' AND ')}`;
+    const total = db.prepare(`SELECT COUNT(*) count ${from} ${where}`).get(...args)
         .count;
     const rows = db
         .prepare(`SELECT tasks.*,agents.name agent_name,reviewer.name reviewer_name,
      reviewer.active reviewer_active,reviewer.must_change_password reviewer_must_change_password,
      si.channels_json,si.client_message_count,si.agent_message_count,si.transcript_json,
-     si.completed_at_utc closed_at_utc ${from}
-     ORDER BY tasks.created_at DESC,tasks.id LIMIT ? OFFSET ?`)
+     si.completed_at_utc closed_at_utc ${from} ${taskWorkloadJoin(db, input.sort_by)} ${where}
+     ORDER BY ${tableOrderBy(input, taskColumns, 'tasks.created_at DESC,tasks.id', 'tasks.id')} LIMIT ? OFFSET ?`)
         .all(...args, input.page_size, (input.page - 1) * input.page_size);
     const assignments = reviewerReadinessMap(db, rows.map((row) => String(row.reviewer_user_id)), configuredDefaultCapacity(db));
     return pageResult(rows.map((row) => taskDto(row, true, assignments.get(String(row.reviewer_user_id)))), total, input.page, input.page_size);

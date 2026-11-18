@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { historyActor, historicalRows, historicalItem, historicalDetail } from './history.js';
 import { callHistoryRows, callHistoryItem, callHistoryDetail } from './callHistory.js';
+import { evaluationOrderFields } from '../evaluationListOrdering.js';
 const date = z
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
@@ -11,6 +12,7 @@ const date = z
 });
 const filters = z
     .object({
+    ...evaluationOrderFields,
     from: date.optional(),
     to: date.optional(),
     limit: z.coerce.number().int().min(1).max(100).default(25),
