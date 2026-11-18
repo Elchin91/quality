@@ -3,10 +3,19 @@ import { openReadyRecordingFile, } from '../callQa/recordingAccess.js';
 import { ReadyFileRangeStream } from '../callQa/recordingAccessStream.js';
 import { parseByteRange } from '../callQa/range.js';
 import { MAX_RECORDING_BYTES } from '../callQa/recordingConfig.js';
+import { manualRecordingRow, openManualRecording } from './manualRecording.js';
 import { conversationScope, exactConversationTask } from './access.js';
 function recording(input) {
-    const scope = conversationScope(input.db, input.actorId, input.evaluationId, input.teamLeadId);
-    if (!scope || scope.actor.role === 'reviewer' || scope.evaluation.type !== 'call')
+    const scope = conversationScope(input.db, input.actorId, input.evaluationId, input.teamLeadId, input.appealId);
+    if (!scope || scope.actor.role === 'reviewer')
+        throw new Error('not_found');
+    if (scope.appealId && !scope.evaluation.source_ref?.startsWith('call-qa:')) {
+        const upload = manualRecordingRow(input.db, scope.evaluation);
+        if (!upload)
+            throw new Error('not_found');
+        return { ...upload, task_id: null, source_id: null, role: scope.actor.role };
+    }
+    if (scope.evaluation.type !== 'call')
         throw new Error('not_found');
     const task = exactConversationTask(input.db, scope.evaluation);
     if (!task)
@@ -43,7 +52,10 @@ export async function openEvaluationRecording(input) {
             body: null,
             close: async () => { },
         };
-    const file = await (input.openReadyFile ?? openReadyRecordingFile)({
+    const openFile = row.source_id
+        ? (input.openReadyFile ?? openReadyRecordingFile)
+        : openManualRecording;
+    const file = await openFile({
         uploadsRoot: input.uploadsRoot,
         uploadId: row.id,
         storagePath: row.path,
@@ -67,6 +79,9 @@ export async function openEvaluationRecording(input) {
             .transaction(() => {
             if (JSON.stringify(recording(input)) !== JSON.stringify(row))
                 throw new Error('recording_unavailable');
+            // Manual uploads have no managed call source to reference in the recording audit table.
+            if (!row.source_id)
+                return;
             const action = row.role === 'admin'
                 ? 'admin_preview'
                 : row.role === 'agent'

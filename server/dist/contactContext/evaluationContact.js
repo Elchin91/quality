@@ -27,6 +27,7 @@ function contact(value, kind) {
     }
     if ((kind === 'telegram' || kind === 'other') && typeof value === 'string') {
         const text = value.trim();
+        // eslint-disable-next-line no-control-regex -- Contact labels must not contain control characters.
         if (text && text.length <= 128 && !/[\u0000-\u001f\u007f]/u.test(text))
             return { value: text, kind, source_url: null };
     }
@@ -35,6 +36,11 @@ function contact(value, kind) {
 /** Imported sheets have no reliable source URL/channel. Do not expand partial numbers or IDs. */
 export function historicalEvaluationContact(metadata) {
     return contact(object(metadata).phone, 'phone');
+}
+/** Some earlier call evaluations kept the full caller number under caller_number. */
+export function appealCallContact(metadata) {
+    const values = object(metadata);
+    return contact(phone(values.phone) ?? values.caller_number, 'phone');
 }
 /** Create once per authorized list/detail response; source-schema checks are not repeated per row. */
 export function createEvaluationContactResolver(db) {

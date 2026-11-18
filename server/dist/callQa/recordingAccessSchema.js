@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { sharedLeadInboxSql } from '../appeals/leadRouting.js';
 import { MAX_RECORDING_BYTES } from './recordingConfig.js';
 import { isOpaqueAccessEventId } from './recordingAccessIds.js';
 const validationDatabases = new WeakSet();
@@ -145,14 +146,23 @@ export function createRecordingAccessGuards(db) {
     const teamReady = tableHasColumns(db, 'evaluations', ['id', 'agent_id', 'type', 'status', 'source_ref']) &&
         tableHasColumns(db, 'agent_team_memberships', ['agent_id', 'team_lead_user_id']) &&
         tableHasColumns(db, 'call_qa_tasks', ['evaluation_id', 'agent_id']);
+    const appealScope = tableHasColumns(db, 'appeals', [
+        'evaluation_id',
+        'agent_id',
+        'status',
+        'required_team_lead_user_id',
+    ])
+        ? `OR EXISTS (SELECT 1 FROM appeals p WHERE p.evaluation_id=e.id AND p.agent_id=e.agent_id AND ${sharedLeadInboxSql})`
+        : '';
     const teamGuard = teamReady
         ? `NEW.actor_role<>'team_lead' OR NEW.task_id IS NULL OR NOT EXISTS (
     SELECT 1 FROM call_qa_tasks tasks JOIN evaluations e ON e.id=tasks.evaluation_id
-    JOIN agent_team_memberships m ON m.agent_id=e.agent_id JOIN users lead ON lead.id=m.team_lead_user_id
     WHERE tasks.id=NEW.task_id AND tasks.source_record_id=NEW.source_record_id
       AND tasks.status='completed' AND e.status='completed' AND e.type='call'
       AND e.agent_id=tasks.agent_id AND e.source_ref='call-qa:'||tasks.source_record_id
-      AND lead.role='team_lead' AND lead.active=1 AND lead.must_change_password=0
+      AND (EXISTS (SELECT 1 FROM agent_team_memberships m JOIN users lead ON lead.id=m.team_lead_user_id
+        WHERE m.agent_id=e.agent_id AND lead.role='team_lead' AND lead.active=1 AND lead.must_change_password=0)
+        ${appealScope})
   )`
         : '1=1';
     const agentReady = tableHasColumns(db, 'evaluations', ['id', 'agent_id', 'type', 'status', 'source_ref']) &&

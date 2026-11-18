@@ -1,8 +1,9 @@
+import { sharedLeadInboxSql } from '../appeals/leadRouting.js';
 import { businessDateSql } from '../effectiveEvaluations.js';
 import { historicalRows, historyActor } from '../importM10/history.js';
 import { selectedTeamLead } from '../team/access.js';
 /** Resolve current account and existing evaluation scope; session claims never replace DB identity. */
-export function conversationScope(db, actorId, evaluationId, selectedLead) {
+export function conversationScope(db, actorId, evaluationId, selectedLead, appealId) {
     const actor = historyActor(db, actorId);
     if (!actor || (selectedLead !== undefined && actor.role !== 'team_lead'))
         return null;
@@ -12,6 +13,17 @@ export function conversationScope(db, actorId, evaluationId, selectedLead) {
         .get(evaluationId);
     if (!evaluation)
         return null;
+    if (appealId !== undefined) {
+        if (selectedLead !== undefined || (actor.role !== 'team_lead' && actor.role !== 'admin'))
+            return null;
+        if (evaluation.type === 'chat')
+            return null;
+        const visible = db
+            .prepare(`SELECT 1 FROM appeals p WHERE p.id=? AND p.evaluation_id=? AND p.agent_id=?
+       ${actor.role === 'team_lead' ? 'AND ' + sharedLeadInboxSql : ''}`)
+            .get(appealId, evaluation.id, evaluation.agent_id);
+        return visible ? { evaluation, actor, appealId } : null;
+    }
     if (evaluation.type === 'unknown' && evaluation.source_ref?.startsWith('m10:')) {
         // Historical leadership is receipt/alias based, not today's team membership.
         if (selectedLead !== undefined || !historicalRows(db, actor, { id: evaluationId }).length)
