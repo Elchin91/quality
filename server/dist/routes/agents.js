@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { nanoid } from 'nanoid';
 import { db } from '../db.js';
+import { deleteStaffRecord } from '../users/staffRemoval.js';
 export const agentsRouter = Router();
 const agentShape = z.object({
     name: z.string().min(1),
@@ -49,7 +50,4 @@ agentsRouter.put('/agents/:id', (req, res) => {
         return res.status(404).json({ error: 'not found' });
     res.json({ id: req.params.id, ...parsed.data });
 });
-agentsRouter.delete('/agents/:id', (req, res) => {
-    const r = db.prepare('DELETE FROM agents WHERE id = ?').run(req.params.id);
-    res.json({ ok: r.changes > 0 });
-});
+agentsRouter.delete('/agents/:id', (req, res) => deleteStaffRecord(db, 'agents', req, res, true));

@@ -6,6 +6,7 @@ import { ALLOWED_DOMAIN, hashPassword, isAllowedEmail, normalizeEmail, requireAd
 import { asyncHandler } from '../asyncHandler.js';
 import { setTeamMembership } from '../team/service.js';
 import { writeStaffAudit } from '../users/staffAudit.js';
+import { deleteStaffRecord } from '../users/staffRemoval.js';
 import { enqueueReviewerRefill } from '../jobs/qaRefill.js';
 import { configuredDefaultCapacity, reviewerReadiness, reviewerReadinessMap, updateReviewerProfile, REVIEWER_GROUPS, } from '../reviewerAssignment/repository.js';
 export const adminUsersRouter = Router();
@@ -354,19 +355,5 @@ adminUsersRouter.patch('/admin/users/:id', requireAuth, requireAdmin, asyncHandl
     }
     res.json({ ok: true });
 }));
-adminUsersRouter.delete('/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
-    const target = db.prepare('SELECT role FROM users WHERE id = ?').get(req.params.id);
-    if (!target)
-        return res.status(404).json({ error: 'not found' });
-    if (target.role === 'admin') {
-        const activeAdmins = db.prepare(`SELECT COUNT(*) AS c FROM users WHERE role = 'admin' AND active = 1`).get().c;
-        if (activeAdmins <= 1) {
-            return res.status(400).json({ error: 'cannot delete the last active admin' });
-        }
-    }
-    if (req.user?.id === req.params.id) {
-        return res.status(400).json({ error: 'cannot delete your own account' });
-    }
-    db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
-    res.json({ ok: true });
-});
+adminUsersRouter.delete('/admin/users/:id', requireAuth, requireAdmin, (req, res) => deleteStaffRecord(db, 'users', req, res));
+adminUsersRouter.delete('/admin/staff/agents/:id', requireAuth, requireAdmin, (req, res) => deleteStaffRecord(db, 'agents', req, res));

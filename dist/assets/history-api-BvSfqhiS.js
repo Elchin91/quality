@@ -1,0 +1,1 @@
+import{k as e}from"./index-BwGBF2bU.js";var t={calls:(t,n)=>e(`/api/history/call-evaluations?${t}`,{signal:n}),callDetail:(t,n)=>e(`/api/history/call-evaluations/${encodeURIComponent(t)}`,{signal:n}),list:(t,n)=>e(`/api/history/evaluations?${t}`,{signal:n}),detail:(t,n)=>e(`/api/history/evaluations/${encodeURIComponent(t)}`,{signal:n})};export{t};
